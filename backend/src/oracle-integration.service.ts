@@ -5,6 +5,8 @@ import { Repository, In } from 'typeorm';
 import { StgErpItem } from './stg-erp-item.entity';
 import { StgErpOrderHeader } from './stg-erp-order-header.entity';
 import { StgErpOrderLine } from './stg-erp-order-line.entity';
+import { DpsAutoBatchLog } from './dps-auto-batch-log.entity';
+import { AUTO_BATCH_PLSQL } from './scripts/auto-batch-plsql';
 
 @Injectable()
 export class OracleIntegrationService implements OnModuleDestroy {
@@ -17,6 +19,8 @@ export class OracleIntegrationService implements OnModuleDestroy {
     private stgErpOrderHeaderRepository: Repository<StgErpOrderHeader>,
     @InjectRepository(StgErpOrderLine)
     private stgErpOrderLineRepository: Repository<StgErpOrderLine>,
+    @InjectRepository(DpsAutoBatchLog)
+    private dpsAutoBatchLogRepository: Repository<DpsAutoBatchLog>,
   ) {
     // เปิดใช้งาน Thick mode เพื่อรองรับ Oracle DB ที่ใช้ password verifier แบบเก่า
     try {
@@ -184,7 +188,10 @@ export class OracleIntegrationService implements OnModuleDestroy {
    * ดึงข้อมูล Item ทั้งหมดจาก Local DB
    */
   async getLocalItems(): Promise<StgErpItem[]> {
-    return this.stgErpItemRepository.find({ order: { erpItemCode: 'ASC' }, take: 1000 });
+    return this.stgErpItemRepository.find({
+      order: { erpItemCode: 'ASC' },
+      take: 1000,
+    });
   }
 
   /**
@@ -277,7 +284,7 @@ export class OracleIntegrationService implements OnModuleDestroy {
    */
   async getLocalOrderHeaders(): Promise<StgErpOrderHeader[]> {
     return this.stgErpOrderHeaderRepository.find({
-      order: { erpOrderDate: 'DESC' }
+      order: { erpOrderDate: 'DESC' },
     });
   }
 
@@ -414,6 +421,35 @@ export class OracleIntegrationService implements OnModuleDestroy {
             savedLines.push(...saved);
           }
         }
+
+        // 3. Delete orphaned lines (lines that exist locally for these headers but were deleted in ERP)
+        const localLinesForHeaders = [];
+        for (let j = 0; j < chunk.length; j += mssqlChunkSize) {
+          const headerChunk = chunk.slice(j, j + mssqlChunkSize);
+          const lines = await this.stgErpOrderLineRepository.find({
+            where: headerChunk.map((hid) => ({ erpOrderHeaderId: hid })),
+          });
+          localLinesForHeaders.push(...lines);
+        }
+
+        const oracleLineIds = new Set(
+          erpRows.map((r) => String(r.ERP_ORDER_LINE_ID)),
+        );
+        const orphanedLines = localLinesForHeaders.filter(
+          (l) => !oracleLineIds.has(String(l.erpOrderLineId)),
+        );
+
+        if (orphanedLines.length > 0) {
+          console.log(
+            `[ERP Sync] Deleting ${orphanedLines.length} orphaned order lines for synced headers...`,
+          );
+          // Delete in batches to avoid query limits
+          const deleteChunkSize = 1000;
+          for (let j = 0; j < orphanedLines.length; j += deleteChunkSize) {
+            const deleteChunk = orphanedLines.slice(j, j + deleteChunkSize);
+            await this.stgErpOrderLineRepository.remove(deleteChunk);
+          }
+        }
       }
 
       return savedLines;
@@ -436,7 +472,7 @@ export class OracleIntegrationService implements OnModuleDestroy {
    */
   async getLocalOrderLines(): Promise<StgErpOrderLine[]> {
     return this.stgErpOrderLineRepository.find({
-      order: { erpOrderHeaderId: 'DESC', erpOrderLineNumber: 'ASC' }
+      order: { erpOrderHeaderId: 'DESC', erpOrderLineNumber: 'ASC' },
     });
   }
 
@@ -592,10 +628,14 @@ export class OracleIntegrationService implements OnModuleDestroy {
     const headerIdsParam = (query as any)?.headerIds;
     const lineIdsParam = (query as any)?.lineIds;
 
-    const queryBuilder = this.stgErpOrderHeaderRepository.createQueryBuilder('header');
+    const queryBuilder =
+      this.stgErpOrderHeaderRepository.createQueryBuilder('header');
 
     if (startDate && endDate) {
-      queryBuilder.andWhere('header.erpOrderDate BETWEEN :startDate AND :endDate', { startDate, endDate });
+      queryBuilder.andWhere(
+        'header.erpOrderDate BETWEEN :startDate AND :endDate',
+        { startDate, endDate },
+      );
     } else if (startDate) {
       queryBuilder.andWhere('header.erpOrderDate >= :startDate', { startDate });
     } else if (endDate) {
@@ -608,12 +648,15 @@ export class OracleIntegrationService implements OnModuleDestroy {
         FROM stg_erp_order_lines l 
         WHERE l.erp_order_ship_date BETWEEN :shipStartDate AND :shipEndDate
       )`;
-      
+
       const binds: any = { shipStartDate, shipEndDate };
       const orConditions = [];
 
       if (headerIdsParam) {
-        const ids = headerIdsParam.split(',').map((id: string) => parseInt(id.trim(), 10)).filter(Boolean);
+        const ids = headerIdsParam
+          .split(',')
+          .map((id: string) => parseInt(id.trim(), 10))
+          .filter(Boolean);
         if (ids.length > 0) {
           orConditions.push(`header.erpOrderHeaderId IN (:...headerIds)`);
           binds.headerIds = ids;
@@ -621,7 +664,10 @@ export class OracleIntegrationService implements OnModuleDestroy {
       }
 
       if (lineIdsParam) {
-        const lineIds = lineIdsParam.split(',').map((id: string) => parseInt(id.trim(), 10)).filter(Boolean);
+        const lineIds = lineIdsParam
+          .split(',')
+          .map((id: string) => parseInt(id.trim(), 10))
+          .filter(Boolean);
         if (lineIds.length > 0) {
           orConditions.push(`header.erpOrderHeaderId IN (
             SELECT DISTINCT l2.erp_order_header_id 
@@ -635,14 +681,17 @@ export class OracleIntegrationService implements OnModuleDestroy {
       if (orConditions.length > 0) {
         subQueryCondition = `(${subQueryCondition} OR ${orConditions.join(' OR ')})`;
       }
-      
+
       queryBuilder.andWhere(subQueryCondition, binds);
     } else {
       const binds: any = {};
       const orConditions = [];
 
       if (headerIdsParam) {
-        const ids = headerIdsParam.split(',').map((id: string) => parseInt(id.trim(), 10)).filter(Boolean);
+        const ids = headerIdsParam
+          .split(',')
+          .map((id: string) => parseInt(id.trim(), 10))
+          .filter(Boolean);
         if (ids.length > 0) {
           orConditions.push(`header.erpOrderHeaderId IN (:...headerIds)`);
           binds.headerIds = ids;
@@ -650,7 +699,10 @@ export class OracleIntegrationService implements OnModuleDestroy {
       }
 
       if (lineIdsParam) {
-        const lineIds = lineIdsParam.split(',').map((id: string) => parseInt(id.trim(), 10)).filter(Boolean);
+        const lineIds = lineIdsParam
+          .split(',')
+          .map((id: string) => parseInt(id.trim(), 10))
+          .filter(Boolean);
         if (lineIds.length > 0) {
           orConditions.push(`header.erpOrderHeaderId IN (
             SELECT DISTINCT l2.erp_order_header_id 
@@ -675,13 +727,15 @@ export class OracleIntegrationService implements OnModuleDestroy {
     }
 
     if (isManual !== undefined) {
-      queryBuilder.andWhere('header.isManual = :isManual', { isManual: isManual === 'true' ? 1 : 0 });
+      queryBuilder.andWhere('header.isManual = :isManual', {
+        isManual: isManual === 'true' ? 1 : 0,
+      });
     }
 
     if (searchText) {
       queryBuilder.andWhere(
         '(header.erpOrderNumber LIKE :search OR header.erpCustomerName LIKE :search OR header.erpCustomerNumber LIKE :search)',
-        { search: `%${searchText}%` }
+        { search: `%${searchText}%` },
       );
     }
 
@@ -709,31 +763,38 @@ export class OracleIntegrationService implements OnModuleDestroy {
 
     if (headers.length === 0) {
       return pageNum && limitNum
-        ? { success: true, data: [], total: 0, page: pageNum, limit: limitNum, totalPages: 0 }
+        ? {
+            success: true,
+            data: [],
+            total: 0,
+            page: pageNum,
+            limit: limitNum,
+            totalPages: 0,
+          }
         : [];
     }
 
-    const headerIds = headers.map(h => h.erpOrderHeaderId);
+    const headerIds = headers.map((h) => h.erpOrderHeaderId);
 
     // Fetch lines only for these headers in chunks to avoid MS SQL 2100 param limit
-    let lines: any[] = [];
+    const lines: any[] = [];
     const chunkSize = 500;
     for (let i = 0; i < headerIds.length; i += chunkSize) {
       const chunkIds = headerIds.slice(i, i + chunkSize);
       const chunkLines = await this.stgErpOrderLineRepository.find({
-        where: { erpOrderHeaderId: In(chunkIds) }
+        where: { erpOrderHeaderId: In(chunkIds) },
       });
       lines.push(...chunkLines);
     }
 
     // Extract unique item codes to fetch descriptions
-    const uniqueItemCodes = [...new Set(lines.map(l => l.erpOrderItemCode))];
-    let items: any[] = [];
+    const uniqueItemCodes = [...new Set(lines.map((l) => l.erpOrderItemCode))];
+    const items: any[] = [];
     if (uniqueItemCodes.length > 0) {
       for (let i = 0; i < uniqueItemCodes.length; i += chunkSize) {
         const chunkCodes = uniqueItemCodes.slice(i, i + chunkSize);
         const chunkItems = await this.stgErpItemRepository.find({
-          where: { erpItemCode: In(chunkCodes) }
+          where: { erpItemCode: In(chunkCodes) },
         });
         items.push(...chunkItems);
       }
@@ -745,7 +806,9 @@ export class OracleIntegrationService implements OnModuleDestroy {
 
     // Fetch the sum of quantity_kg from mps_plan_orders grouped by erp_order_line_id
     const allocationMap = new Map<number, number>();
-    const lineIds = lines.map(l => l.erpOrderLineId).filter(id => id !== null && id !== undefined);
+    const lineIds = lines
+      .map((l) => l.erpOrderLineId)
+      .filter((id) => id !== null && id !== undefined);
     if (lineIds.length > 0) {
       const allocationChunkSize = 500;
       for (let i = 0; i < lineIds.length; i += allocationChunkSize) {
@@ -757,7 +820,10 @@ export class OracleIntegrationService implements OnModuleDestroy {
           GROUP BY erp_order_line_id
         `);
         allAllocations.forEach((alloc: any) => {
-          allocationMap.set(Number(alloc.lineId), Number(alloc.totalAllocated || 0));
+          allocationMap.set(
+            Number(alloc.lineId),
+            Number(alloc.totalAllocated || 0),
+          );
         });
       }
     }
@@ -788,6 +854,249 @@ export class OracleIntegrationService implements OnModuleDestroy {
       };
     } else {
       return mappedData;
+    }
+  }
+
+  /**
+   * ดึงข้อมูลสูตร (Recipe) จาก Oracle ERP ตาม Item Code
+   */
+  async getRecipesByItemCode(itemCode: string): Promise<any> {
+    const item = await this.stgErpItemRepository.findOne({
+      where: { erpItemCode: itemCode },
+    });
+
+    if (!item || !item.erpItemId) {
+      console.warn(`Item code ${itemCode} not found in local DB or missing erpItemId`);
+      return [];
+    }
+
+    const itemId = item.erpItemId;
+    let conn;
+    try {
+      conn = await this.connect();
+
+      const sql = `
+        SELECT RCP.RECIPE_ID,
+               RECIPE_NO,
+               RECIPE_VERSION,
+               RECIPE_DESCRIPTION
+        FROM   GMD_RECIPES RCP
+        JOIN   FM_FORM_MST FHDR ON FHDR.FORMULA_ID = RCP.FORMULA_ID
+        JOIN   FM_MATL_DTL FDTL ON FDTL.FORMULA_ID = FHDR.FORMULA_ID
+        WHERE  RCP.OWNER_ORGANIZATION_ID = 122
+        AND    RCP.RECIPE_STATUS = 700
+        AND    FHDR.FORMULA_STATUS = 700
+        AND    FDTL.INVENTORY_ITEM_ID = :itemId
+      `;
+
+      const result = await conn.execute(sql, { itemId: Number(itemId) }, {
+        outFormat: oracledb.OUT_FORMAT_OBJECT,
+      });
+
+      return result.rows;
+    } catch (err) {
+      console.error('Error fetching recipes:', err);
+      throw err;
+    } finally {
+      if (conn) {
+        try {
+          await conn.close();
+        } catch (e) {
+          console.error('Error closing oracle connection:', e);
+        }
+      }
+    }
+  }
+
+  /**
+   * สร้าง Auto Batch โดยบันทึกลง SG_GME_BATCH_INF
+   */
+  async createAutoBatch(recipes: { recipeNo: string, recipeVersion: number | string, itemCode?: string }[], partId: string, planDate: string): Promise<any> {
+    if (!recipes || recipes.length === 0) return { success: false, message: 'No recipes provided' };
+    
+    // Format planDate to YYYYMMDD (assuming planDate might come as YYYY-MM-DD or similar)
+    const cleanDate = planDate ? planDate.replace(/-/g, '') : new Date().toISOString().split('T')[0].replace(/-/g, '');
+    const prefix = `DPS-${(partId || 'UNKNOWN').toUpperCase()}-${cleanDate}-`;
+    
+    let conn;
+    try {
+      conn = await this.connect();
+
+      // Find max sequence for the day
+      const seqSql = `
+        SELECT MAX(BATCH_NAME) as MAX_BATCH
+        FROM SG_GME_BATCH_INF
+        WHERE BATCH_NAME LIKE :prefix
+      `;
+      const seqResult = await conn.execute(seqSql, { prefix: `${prefix}%` }, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+      
+      let nextSeq = 1;
+      const maxBatch = (seqResult.rows?.[0] as any)?.MAX_BATCH;
+      if (maxBatch) {
+        const parts = maxBatch.split('-');
+        const lastSeqStr = parts[parts.length - 1];
+        const lastSeq = parseInt(lastSeqStr, 10);
+        if (!isNaN(lastSeq)) {
+          nextSeq = lastSeq + 1;
+        }
+      }
+      
+      const batchName = `${prefix}${nextSeq.toString().padStart(2, '0')}`;
+      
+      // Get unique recipes to insert into Oracle
+      const uniqueRecipes = Array.from(new Map(recipes.map(r => [r.recipeNo, r])).values());
+
+      // Insert unique recipes
+      for (const recipe of uniqueRecipes) {
+        const insertSql = `
+          INSERT INTO SG_GME_BATCH_INF (
+            RECIPE_NO,
+            RECIPE_VERSION,
+            FLAG,
+            BATCH_NAME
+          ) VALUES (
+            :recipeNo,
+            :recipeVersion,
+            'N',
+            :batchName
+          )
+        `;
+        
+        await conn.execute(insertSql, {
+          recipeNo: String(recipe.recipeNo),
+          recipeVersion: Number(recipe.recipeVersion),
+          batchName: batchName
+        }, { autoCommit: false });
+      }
+      
+      // Commit transaction
+      await conn.commit();
+      
+      // Execute the Auto Batch PL/SQL script
+      const plsqlBinds = {
+        user_id: '1228',
+        plan_start_date: `${cleanDate.substring(0, 4)}/${cleanDate.substring(4, 6)}/${cleanDate.substring(6, 8)} 00:00:00`,
+        org_code: 'PRD',
+        batch_name: batchName,
+        x_retcode: { dir: oracledb.BIND_OUT, type: oracledb.STRING, maxSize: 10 },
+        x_errbuf: { dir: oracledb.BIND_OUT, type: oracledb.STRING, maxSize: 2000 }
+      };
+
+      const plsqlResult = await conn.execute(AUTO_BATCH_PLSQL, plsqlBinds, { autoCommit: true });
+      const retcode = (plsqlResult.outBinds as any)?.x_retcode;
+      const errbuf = (plsqlResult.outBinds as any)?.x_errbuf;
+      console.log(`Auto Batch PL/SQL Result -> Retcode: ${retcode}, Errbuf: ${errbuf}`);
+
+      // Query Oracle for generated Batch Numbers mapped by Recipe No
+      const fetchBatchNosSql = `
+        SELECT h.BATCH_NO, r.RECIPE_NO, r.RECIPE_VERSION, b.FLAG, b.ERROR_MSG
+        FROM GME_BATCH_HEADER h
+        JOIN GMD_RECIPE_VALIDITY_RULES v ON h.RECIPE_VALIDITY_RULE_ID = v.RECIPE_VALIDITY_RULE_ID
+        JOIN GMD_RECIPES r ON v.RECIPE_ID = r.RECIPE_ID
+        JOIN SG_GME_BATCH_INF b ON r.RECIPE_NO = b.RECIPE_NO AND SUBSTR(b.RECIPE_VERSION,1,2) = TO_CHAR(r.RECIPE_VERSION) AND b.BATCH_NAME = h.ATTRIBUTE2
+        WHERE h.ATTRIBUTE2 = :batchName
+      `;
+      
+      let batchMapping: any[] = [];
+      try {
+        const batchNosResult = await conn.execute(fetchBatchNosSql, { batchName }, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+        batchMapping = batchNosResult.rows || [];
+      } catch (e) {
+        console.error('Error fetching generated batch numbers:', e);
+      }
+
+      // Query any failed items in SG_GME_BATCH_INF that didn't get a BATCH_NO
+      const fetchFailedSql = `
+        SELECT RECIPE_NO, RECIPE_VERSION, FLAG, ERROR_MSG
+        FROM SG_GME_BATCH_INF
+        WHERE BATCH_NAME = :batchName AND FLAG = 'E'
+      `;
+      try {
+        const failedResult = await conn.execute(fetchFailedSql, { batchName }, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+        if (failedResult.rows && failedResult.rows.length > 0) {
+          batchMapping = [...batchMapping, ...failedResult.rows];
+        }
+      } catch (e) {
+        console.error('Error fetching failed batches:', e);
+      }
+
+      // Save logs to local database - FOR EACH ITEM CARD (not just unique recipes)
+      const logs = recipes.map(recipe => {
+        const mappingItem: any = batchMapping.find((m: any) => 
+          String(m.RECIPE_NO) === String(recipe.recipeNo)
+        );
+        
+        let status = 'PENDING';
+        let errorMsg = null;
+        let batchNo = null;
+
+        if (mappingItem) {
+          status = mappingItem.FLAG === 'Y' ? 'SUCCESS' : (mappingItem.FLAG === 'E' ? 'ERROR' : 'UNKNOWN');
+          errorMsg = mappingItem.ERROR_MSG;
+          batchNo = mappingItem.BATCH_NO || null;
+        } else if (retcode !== '0') {
+          status = 'ERROR';
+          errorMsg = errbuf || 'API Error without mapping';
+        }
+
+        return this.dpsAutoBatchLogRepository.create({
+          batchName,
+          partId: partId || 'UNKNOWN',
+          planDate: planDate,
+          itemCode: recipe.itemCode || undefined,
+          recipeNo: String(recipe.recipeNo),
+          recipeVersion: String(recipe.recipeVersion),
+          status,
+          errorMsg,
+          batchNo
+        });
+      });
+      if (logs.length > 0) {
+        await this.dpsAutoBatchLogRepository.save(logs);
+      }
+      
+      return { 
+        success: true, 
+        batchName: batchName, 
+        count: recipes.length,
+        retcode,
+        errbuf
+      };
+    } catch (err) {
+      console.error('Error creating auto batch:', err);
+      if (conn) {
+        try { await conn.rollback(); } catch (e) {}
+      }
+      throw err;
+    } finally {
+      if (conn) {
+        try {
+          await conn.close();
+        } catch (e) {
+          console.error('Error closing oracle connection:', e);
+        }
+      }
+    }
+  }
+
+  /**
+   * ดึงประวัติการรัน Batch Auto
+   */
+  async getBatchLogs(partId: string, planDate: string) {
+    try {
+      const logs = await this.dpsAutoBatchLogRepository.find({
+        where: {
+          partId,
+          planDate
+        },
+        order: {
+          createdAt: 'DESC'
+        }
+      });
+      return { success: true, logs };
+    } catch (err) {
+      console.error('Error fetching batch logs:', err);
+      return { success: false, message: 'Failed to fetch batch logs' };
     }
   }
 

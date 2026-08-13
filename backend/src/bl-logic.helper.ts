@@ -30,7 +30,18 @@ export async function executeBlPlanGeneration(
   // ──────────────────────────────────────
   // 1. Fetch Belt Gate Matrix
   // ──────────────────────────────────────
-  const blBeltGateMatrix = await deps.blBeltGateMatrixRepo.find({ order: { priority: 'ASC' } });
+  let blBeltGateMatrix = await deps.blBeltGateMatrixRepo.find({ order: { priority: 'ASC' } });
+  if (!blBeltGateMatrix || blBeltGateMatrix.length === 0) {
+    blBeltGateMatrix = [
+      { priority: 1, targetProduct: '53-58', rmSize: '161-180', yieldPct: 81.33 },
+      { priority: 2, targetProduct: '30-35', rmSize: '181-200', yieldPct: 82.52 },
+      { priority: 3, targetProduct: '35-40', rmSize: '201-220', yieldPct: 83.47 },
+      { priority: 4, targetProduct: '40-45', rmSize: '221-240', yieldPct: 83.18 },
+      { priority: 5, targetProduct: '45-50', rmSize: '241-260', yieldPct: 83.03 },
+      { priority: 6, targetProduct: '50-55', rmSize: '261-280', yieldPct: 81.99 },
+      { priority: 7, targetProduct: '60-65', rmSize: '281-300', yieldPct: 80.00 }
+    ] as any;
+  }
 
   // ──────────────────────────────────────
   // 2. Fetch BIL Plan for RM Supply
@@ -82,6 +93,10 @@ export async function executeBlPlanGeneration(
     totalBLDR: number;
     blSizes: Record<string, number>;
     initialSizes: Record<string, number>;
+    blkSizes: Record<string, number>;
+    mappedBlkSizes: Record<string, number>;
+    internalBlkSizes: Record<string, number>;
+    externalBlkSizes: Record<string, number>;
     available: { BL: number, BLTH: number, BLDR: number };
     internalAvailable: { BL: number, BLTH: number, BLDR: number };
     externalAvailable: { BL: number, BLTH: number, BLDR: number };
@@ -121,12 +136,21 @@ export async function executeBlPlanGeneration(
       const blThData = bpVals.find(v => v.name && v.name.includes('สะโพก')) || byProducts['BL-TH'] || {};
       const blDrData = bpVals.find(v => v.name && v.name.includes('น่อง')) || byProducts['BL-DR'] || {};
       
-      const blKg = Number(blData.qty || blData.kg || blData.quantity || 0);
+            const blKgRaw = Number(blData.qty || blData.kg || blData.quantity || 0);
+      const blKg = blKgRaw * 0.75;
+      const blkKg = blKgRaw * 0.25;
+
       const blThKg = Number(blThData.qty || blThData.kg || blThData.quantity || 0) * 0.75;
       const blDrKg = Number(blDrData.qty || blDrData.kg || blDrData.quantity || 0) * 0.75;
       
-      const intBlKg = Number(blData.internalQty ?? blKg);
-      const extBlKg = Number(blData.externalQty ?? 0);
+      const intBlKgRaw = Number(blData.internalQty ?? blKgRaw);
+      const extBlKgRaw = Number(blData.externalQty ?? 0);
+      
+      const intBlKg = intBlKgRaw * 0.75;
+      const extBlKg = extBlKgRaw * 0.75;
+      const intBlkKg = intBlKgRaw * 0.25;
+      const extBlkKg = extBlKgRaw * 0.25;
+
       const intBlThKg = Number(blThData.internalQty ?? (blThData.qty || blThData.kg || 0)) * 0.75;
       const extBlThKg = Number(blThData.externalQty ?? 0) * 0.75;
       const intBlDrKg = Number(blDrData.internalQty ?? (blDrData.qty || blDrData.kg || 0)) * 0.75;
@@ -141,15 +165,12 @@ export async function executeBlPlanGeneration(
 
       const rawBlSizes = { ...(blData.sizes || {}) };
       const blSizes: Record<string, number> = {};
-      Object.entries(rawBlSizes).forEach(([sz, qty]) => {
-        const prefixedSize = sz.startsWith('BL') ? sz : `BL ${sz}`;
-        blSizes[prefixedSize] = Number(qty);
-      });
-      
-      // Fallback for missing BL-DEBONE sizes
-      const currentBlSizeSum = Object.values(blSizes).reduce((sum, v) => sum + Number(v), 0);
-      if (blKg > 0 && currentBlSizeSum < blKg * 0.95) {
-        const missingKg = blKg - currentBlSizeSum;
+      const blkSizes: Record<string, number> = {};
+
+      // Fallback for missing BL-DEBONE sizes before split
+      const currentBlSizeSumRaw = Object.values(rawBlSizes).reduce((sum: number, v: any) => sum + Number(v), 0) as number;
+      if (blKgRaw > 0 && currentBlSizeSumRaw < blKgRaw * 0.95) {
+        const missingKgRaw = blKgRaw - currentBlSizeSumRaw;
         let totalBilSizes = 0;
         const bilSizesMap: Record<string, number> = {};
         if (supply.sizes) {
@@ -159,19 +180,26 @@ export async function executeBlPlanGeneration(
           });
         }
         if (totalBilSizes > 0) {
-          // Assuming blColLabelsMap is passed or we construct a simple one
-          // We will fetch it before the loop
           Object.keys(bilSizesMap).forEach(bilSz => {
-            // Need to make sure blColLabelsMap is defined before the loop
             let blSz = (deps as any)._blColLabelsMap ? (deps as any)._blColLabelsMap[bilSz] || `BL ${bilSz}` : `BL ${bilSz}`;
-            blSz = blSz.startsWith('BL') ? blSz : `BL ${blSz}`;
+            if (blSz.startsWith('BL ')) blSz = blSz.replace('BL ', '');
             const ratio = bilSizesMap[bilSz] / totalBilSizes;
-            blSizes[blSz] = (blSizes[blSz] || 0) + (missingKg * ratio);
+            rawBlSizes[blSz] = (rawBlSizes[blSz] || 0) + (missingKgRaw * ratio);
           });
         } else {
-          blSizes['BL Unsize'] = (blSizes['BL Unsize'] || 0) + missingKg;
+          rawBlSizes['Unsize'] = (rawBlSizes['Unsize'] || 0) + missingKgRaw;
         }
       }
+
+      Object.entries(rawBlSizes).forEach(([sz, qty]) => {
+        let rawSz = sz;
+        if (rawSz.startsWith('BL ')) rawSz = rawSz.replace('BL ', '');
+        const prefixedSize = rawSz.startsWith('BL') ? rawSz : `BL ${rawSz}`;
+        
+        const qtyNum = Number(qty);
+        blSizes[prefixedSize] = qtyNum * 0.75;
+        blkSizes[rawSz] = qtyNum * 0.25;
+      });
 
       const blThSizes: Record<string, number> = {};
       Object.entries(blThData.sizes || {}).forEach(([size, qty]: any) => {
@@ -192,7 +220,6 @@ export async function executeBlPlanGeneration(
         blSizes[size] = (blSizes[size] || 0) + qty;
       });
 
-
       const internalSizes: Record<string, number> = {};
       const externalSizes: Record<string, number> = {};
       Object.keys(blSizes).forEach(k => {
@@ -207,12 +234,24 @@ export async function executeBlPlanGeneration(
               externalSizes[k] = blSizes[k] * blRatioExt;
           }
       });
+
+      const internalBlkSizes: Record<string, number> = {};
+      const externalBlkSizes: Record<string, number> = {};
+      Object.keys(blkSizes).forEach(k => {
+          internalBlkSizes[k] = blkSizes[k] * blRatioInt;
+          externalBlkSizes[k] = blkSizes[k] * blRatioExt;
+      });
+
       supplyMap.set(dateStr, {
         totalBL: blKg,
         totalBLTH: blThKg,
         totalBLDR: blDrKg,
         blSizes: { ...blSizes },
         initialSizes: { ...blSizes },
+        blkSizes: { ...blkSizes },
+        mappedBlkSizes: {},
+        internalBlkSizes,
+        externalBlkSizes,
         available: { BL: blKg, BLTH: blThKg, BLDR: blDrKg },
         internalAvailable: { BL: intBlKg, BLTH: intBlThKg, BLDR: intBlDrKg },
         externalAvailable: { BL: extBlKg, BLTH: extBlThKg, BLDR: extBlDrKg },
@@ -325,7 +364,7 @@ export async function executeBlPlanGeneration(
   // Phase 5: BL-DR → RM BL-DR
   // Phase 6: Manual Trimming อื่นๆ → RM BL ที่เหลือ
 
-  const extractBeltGateSizes = (desc: string, specSize?: string): { rmSizes: string[], targetProduct: string, yieldPct: number } | null => {
+  const extractBeltGateSizes = (desc: string, specSize?: string): { rmSizes: string[], targetProduct: string, yieldPct: number, isFallback?: boolean } | null => {
     for (const rule of blBeltGateMatrix) {
       if (desc.includes(rule.targetProduct)) {
         return { rmSizes: [rule.rmSize], targetProduct: rule.targetProduct, yieldPct: Number(rule.yieldPct || 100) };
@@ -353,54 +392,8 @@ export async function executeBlPlanGeneration(
 
     // Fallback to parsed size
     if (sToUse && sToUse.toLowerCase() !== 'unsize' && sToUse.trim() !== '') {
-      const s = sToUse.toLowerCase().trim();
-      const allBinDefs = [
-        { key: 'BL 140 Down', lo: 0, hi: 140 },
-        { key: 'BL 140-160', lo: 140, hi: 160 },
-        { key: 'BL 160-180', lo: 160, hi: 180 },
-        { key: 'BL 180-200', lo: 180, hi: 200 },
-        { key: 'BL 200-220', lo: 200, hi: 220 },
-        { key: 'BL 220-240', lo: 220, hi: 240 },
-        { key: 'BL 240-260', lo: 240, hi: 260 },
-        { key: 'BL 260-280', lo: 260, hi: 280 },
-        { key: 'BL 280-300', lo: 280, hi: 300 },
-        { key: 'BL 300-320', lo: 300, hi: 320 },
-        { key: 'BL 320-340', lo: 320, hi: 340 },
-        { key: 'BL 340-360', lo: 340, hi: 360 },
-        { key: 'BL 360-380', lo: 360, hi: 380 },
-        { key: 'BL 380 Up', lo: 380, hi: 9999 }
-      ];
-      
-      let lo = -1, hi = -1;
-      if (s.includes('down')) {
-        const m = s.match(/(\d+)/);
-        if (m) { lo = 0; hi = parseInt(m[1], 10); }
-      } else if (s.includes('up')) {
-        const m = s.match(/(\d+)/);
-        if (m) { lo = parseInt(m[1], 10); hi = 9999; }
-      } else {
-        const m = s.match(/(\d+)\s*[-–]\s*(\d+)/);
-        if (m) { 
-          lo = parseInt(m[1], 10); 
-          hi = parseInt(m[2], 10); 
-        } else {
-          const singleMatch = s.match(/^(\d+)$/);
-          if (singleMatch) {
-            lo = parseInt(singleMatch[1], 10);
-            hi = parseInt(singleMatch[1], 10);
-          }
-        }
-      }
-
-      if (lo >= 0 && hi >= 0 && hi >= lo) {
-        const overlaps = allBinDefs.filter(b => {
-          if (lo === hi) return lo >= b.lo && hi <= b.hi; // Point inside bin
-          return Math.max(lo, b.lo) < Math.min(hi, b.hi); // True overlap
-        });
-        if (overlaps.length > 0) {
-          return { rmSizes: overlaps.map(b => b.key), targetProduct: `Fallback (${sToUse})`, yieldPct: 100 };
-        }
-      }
+      let sizeKey = sToUse.replace(/\s*[A-Za-z]+.*/, ''); 
+      return { rmSizes: [sizeKey], targetProduct: sizeKey, yieldPct: 100, isFallback: true };
     }
     return null;
   };
@@ -597,6 +590,30 @@ export async function executeBlPlanGeneration(
     return { total: totalDeducted, intUsed: intDeducted, extUsed: extDeducted };
   };
 
+  const resolveTargetSize = (sup: any, targetSize: string, isFallback: boolean) => {
+    let matchSz = targetSize;
+    if (isFallback) {
+      const m = targetSize.match(/(\d+)\s*[-–]\s*(\d+)/);
+      if (m) {
+        const lo = Number(m[1]), hi = Number(m[2]);
+        const foundKey = Object.keys(sup.internalSizes).find(k => {
+           if (k === targetSize || k === `BL ${targetSize}`) return true;
+           const km = k.match(/(\d+)\s*[-–]\s*(\d+)/);
+           if (km) {
+              const klo = Number(km[1]), khi = Number(km[2]);
+              return Math.max(lo, klo) <= Math.min(hi, khi);
+           }
+           return false;
+        });
+        if (foundKey) matchSz = foundKey;
+      } else {
+        const foundKey = Object.keys(sup.internalSizes).find(k => k === `BL ${targetSize}`);
+        if (foundKey) matchSz = foundKey;
+      }
+    }
+    return matchSz;
+  };
+
   // ══════════════════════════════════════
   // Phase 1: Sizing (BLK without I-Cut)
   // ══════════════════════════════════════
@@ -637,12 +654,14 @@ export async function executeBlPlanGeneration(
         const rmType = descUpper.includes('TH') ? 'BLTH' : 'BL';
         const allowedExt = !!(spec as any)?.isExternalRmAllowed;
         
-        let availTargetSize = sup.internalSizes[targetSize] || 0;
-        if (allowedExt) availTargetSize += (sup.externalSizes[targetSize] || 0);
+        let matchSz = resolveTargetSize(sup, targetSize, !!(requiredMapping as any).isFallback);
+
+        let availTargetSize = sup.internalSizes[matchSz] || 0;
+        if (allowedExt) availTargetSize += (sup.externalSizes[matchSz] || 0);
 
         if (availTargetSize > 0) {
           const normalRmToUse = Math.min(availTargetSize, rmNeeded - allocRmQty);
-          const actualDeducted = deductRM(sup, rmType, normalRmToUse, allowedExt, targetSize);
+          const actualDeducted = deductRM(sup, rmType, normalRmToUse, allowedExt, matchSz);
           allocRmQty += actualDeducted.total;
         }
       }
@@ -704,8 +723,102 @@ export async function executeBlPlanGeneration(
     }
   }
 
+
+
+
+  // ══════════════════════════════════════
+  // Phase 2.5: Transfer Leftover BL to BLK and Apply Belt Gate Matrix
+  // ══════════════════════════════════════
+  for (const [dateStr, sup] of supplyMap.entries()) {
+    for (const [sz, qty] of Object.entries(sup.blSizes)) {
+      if (qty > 0) {
+        let rawSz = sz;
+        if (rawSz.startsWith('BL ')) rawSz = rawSz.replace('BL ', '');
+        sup.blkSizes[rawSz] = (sup.blkSizes[rawSz] || 0) + qty;
+        
+        const intQty = sup.internalSizes[sz] || 0;
+        const extQty = sup.externalSizes[sz] || 0;
+        (sup as any).internalBlkSizes[rawSz] = ((sup as any).internalBlkSizes[rawSz] || 0) + intQty;
+        (sup as any).externalBlkSizes[rawSz] = ((sup as any).externalBlkSizes[rawSz] || 0) + extQty;
+        
+        sup.blSizes[sz] = 0;
+        sup.internalSizes[sz] = 0;
+        sup.externalSizes[sz] = 0;
+      }
+    }
+    
+    (sup as any).mappedInternalBlkSizes = {};
+    (sup as any).mappedExternalBlkSizes = {};
+
+    for (const [rmSz, qty] of Object.entries(sup.blkSizes)) {
+      if (qty <= 0) continue;
+      
+      let mapped = false;
+      for (const rule of blBeltGateMatrix || []) {
+        let isMatch = false;
+        if (rule.rmSize === rmSz) {
+            isMatch = true;
+        } else {
+            const r1 = rule.rmSize.match(/(\d+)\s*-\s*(\d+)/);
+            const r2 = rmSz.match(/(\d+)\s*-\s*(\d+)/);
+            if (r1 && r2) {
+               const min1 = Number(r1[1]), max1 = Number(r1[2]);
+               const min2 = Number(r2[1]), max2 = Number(r2[2]);
+               if (min1 <= max2 && min2 <= max1) isMatch = true;
+            }
+        }
+        
+        if (isMatch) {
+           const targetQty = qty * Number(rule.yieldPct || 100) / 100.0;
+           const targetSz = rule.targetProduct;
+           (sup as any).mappedBlkSizes[targetSz] = ((sup as any).mappedBlkSizes[targetSz] || 0) + targetQty;
+           
+           const intQty = (sup as any).internalBlkSizes[rmSz] || 0;
+           const extQty = (sup as any).externalBlkSizes[rmSz] || 0;
+           
+           (sup as any).mappedInternalBlkSizes[targetSz] = ((sup as any).mappedInternalBlkSizes[targetSz] || 0) + (intQty * Number(rule.yieldPct || 100) / 100.0);
+           (sup as any).mappedExternalBlkSizes[targetSz] = ((sup as any).mappedExternalBlkSizes[targetSz] || 0) + (extQty * Number(rule.yieldPct || 100) / 100.0);
+           
+           mapped = true;
+           break;
+        }
+      }
+      
+      if (!mapped) {
+         (sup as any).mappedBlkSizes[rmSz] = ((sup as any).mappedBlkSizes[rmSz] || 0) + qty;
+         (sup as any).mappedInternalBlkSizes[rmSz] = ((sup as any).mappedInternalBlkSizes[rmSz] || 0) + ((sup as any).internalBlkSizes[rmSz] || 0);
+         (sup as any).mappedExternalBlkSizes[rmSz] = ((sup as any).mappedExternalBlkSizes[rmSz] || 0) + ((sup as any).externalBlkSizes[rmSz] || 0);
+      }
+    }
+  }
+
+
+    // Save mapped BLK sizes to DB
+    const supplySizeRecordsBlk: MpsPlanSupplySize[] = [];
+    for (const [dateStr, supData] of supplyMap.entries()) {
+      const savedSup = supplyRecords.find(s => parseLocalDate(s.productionDate) === dateStr);
+      if (!savedSup) continue;
+      
+      for (const [sz, qty] of Object.entries((supData as any).mappedBlkSizes || {})) {
+        if (Number(qty) <= 0) continue;
+        supplySizeRecordsBlk.push(manager.create(MpsPlanSupplySize, {
+          mpsPlanSupply: savedSup,
+          groupSize: sz,
+          quantityKg: Number(qty),
+          partName: 'BLK',
+          productionDate: savedSup.productionDate,
+        }));
+      }
+    }
+    console.log(`[DEBUG] Found ${supplySizeRecordsBlk.length} BLK sizes to save to DB.`);
+    if (supplySizeRecordsBlk.length > 0) {
+      await manager.save(supplySizeRecordsBlk);
+      console.log(`[DEBUG] Successfully saved BLK sizes.`);
+    }
+
   // ══════════════════════════════════════
   // Phase 3: I-CUT (RM remaining -> BLK <=60g, BL TH 20g range)
+
   // ══════════════════════════════════════
   for (const order of phase3IcutOrders) {
     const spec = specMap.get(order.erpOrderItemCode);
@@ -731,20 +844,75 @@ export async function executeBlPlanGeneration(
       const sup = supplyMap.get(dateStr);
       if (!sup) continue;
 
-      const rmType = classification === 'BLTH' ? 'BLTH' : 'BL';
+      const rmType = classification === 'BLTH' ? 'BLTH' : 'BLK';
       const allowedExt = !!(spec as any)?.isExternalRmAllowed;
-      let avail = sup.internalAvailable[rmType];
-      if (allowedExt) avail += sup.externalAvailable[rmType];
+      
+      let avail = 0;
+      if (rmType === 'BLTH') {
+        avail = sup.internalAvailable.BLTH;
+        if (allowedExt) avail += sup.externalAvailable.BLTH;
+      }
 
       const mapping = extractBeltGateSizes(descUpper, (spec as any)?.productSize);
       let sizeKeysToUse: string[] = [];
-      if (mapping && mapping.rmSizes.length > 0) {
-        let maxAvail = 0;
-        for (const sz of mapping.rmSizes) {
-          maxAvail += (sup.internalSizes[sz] || 0) + (allowedExt ? (sup.externalSizes[sz] || 0) : 0);
-          sizeKeysToUse.push(sz);
-        }
-        avail = Math.min(avail, maxAvail);
+      
+      if (rmType === 'BLK') {
+         // I-Cut BLK consumes from mappedBlkSizes!
+         // mapping.targetProduct might not exactly match the key, but extractBeltGateSizes returns rmSizes.
+         // Wait, the Phase 2.5 matrix mapped RM BLK into target sizes (e.g. "53-58").
+         // The order's `specSize` is "53-58 g".
+         // Let's just match the target sizes exactly from mappedBlkSizes based on the order's product size.
+         const targetProductKeys = Object.keys((sup as any).mappedBlkSizes || {});
+         const orderSize = ((spec as any)?.productSize || '').toLowerCase().replace(/\s+/g, '');
+         let matchedKey = targetProductKeys.find(k => k.toLowerCase().replace(/\s+/g, '') === orderSize);
+         
+         if (!matchedKey && mapping && mapping.targetProduct) {
+             matchedKey = targetProductKeys.find(k => k.toLowerCase().replace(/\s+/g, '') === mapping.targetProduct.toLowerCase().replace(/\s+/g, ''));
+         }
+         
+         if (matchedKey) {
+            avail = ((sup as any).mappedInternalBlkSizes[matchedKey] || 0) + (allowedExt ? ((sup as any).mappedExternalBlkSizes[matchedKey] || 0) : 0);
+            sizeKeysToUse.push(matchedKey);
+         } else {
+            // Try range matching if order size is like '30-40' and target sizes are '30-35', '35-40'
+            const orderMatch = orderSize.match(/(\d+)\s*[-–]\s*(\d+)/);
+            if (orderMatch) {
+              const oMin = Number(orderMatch[1]);
+              const oMax = Number(orderMatch[2]);
+              for (const k of targetProductKeys) {
+                const kMatch = k.match(/(\d+)\s*[-–]\s*(\d+)/);
+                if (kMatch) {
+                  const kMin = Number(kMatch[1]);
+                  const kMax = Number(kMatch[2]);
+                  if (kMin >= oMin && kMax <= oMax) {
+                    sizeKeysToUse.push(k);
+                    avail += ((sup as any).mappedInternalBlkSizes[k] || 0) + (allowedExt ? ((sup as any).mappedExternalBlkSizes[k] || 0) : 0);
+                  }
+                }
+              }
+            }
+         }
+         
+         if (sizeKeysToUse.length === 0 && mapping && mapping.rmSizes.length > 0) {
+            // Fallback to checking mapping target product if it wasn't strictly found
+            avail = 0;
+            for (const sz of mapping.rmSizes) {
+              const intQty = (sup as any).mappedInternalBlkSizes[sz] || 0;
+              const extQty = (sup as any).mappedExternalBlkSizes[sz] || 0;
+              avail += intQty + (allowedExt ? extQty : 0);
+              sizeKeysToUse.push(sz);
+            }
+         }
+      } else {
+         if (mapping && mapping.rmSizes.length > 0) {
+           let maxAvail = 0;
+           for (const targetSize of mapping.rmSizes) {
+             let matchSz = resolveTargetSize(sup, targetSize, !!(mapping as any).isFallback);
+             maxAvail += (sup.internalSizes[matchSz] || 0) + (allowedExt ? (sup.externalSizes[matchSz] || 0) : 0);
+             sizeKeysToUse.push(matchSz);
+           }
+           avail = Math.min(avail, maxAvail);
+         }
       }
 
       if (avail <= 0) continue;
@@ -755,30 +923,66 @@ export async function executeBlPlanGeneration(
 
       const icutSpeed = spec && (spec as any).icutSpeed ? Number((spec as any).icutSpeed) : 1000;
       const rmNeeded = remainingQty / yieldMultiplier;
-      const maxKgAllowedByTime = icutHoursRemaining * icutSpeed;
-      let allocRmQty = Math.round(Math.min(avail, rmNeeded, maxKgAllowedByTime));
+      const maxFgAllowedByTime = icutHoursRemaining * icutSpeed;
+      const maxRmAllowedByTime = maxFgAllowedByTime / yieldMultiplier;
+      let allocRmQty = Math.round(Math.min(avail, rmNeeded, maxRmAllowedByTime));
       
       if (allocRmQty <= 0) continue;
 
       let deducted = { total: 0, extUsed: 0, intUsed: 0 };
-      if (sizeKeysToUse.length > 0) {
+      if (rmType === 'BLK') {
         let remainingToDeduct = allocRmQty;
         for (const sz of sizeKeysToUse) {
            if (remainingToDeduct <= 0) break;
-           const availSz = (sup.internalSizes[sz] || 0) + (allowedExt ? (sup.externalSizes[sz] || 0) : 0);
+           const availSz = ((sup as any).mappedInternalBlkSizes[sz] || 0) + (allowedExt ? ((sup as any).mappedExternalBlkSizes[sz] || 0) : 0);
            const deductAmt = Math.min(availSz, remainingToDeduct);
            if (deductAmt > 0) {
-              const res = deductRM(sup, rmType, deductAmt, allowedExt, sz);
-              deducted.total += res.total;
-              deducted.extUsed += res.extUsed;
-              deducted.intUsed += res.intUsed;
-              remainingToDeduct -= res.total;
+              let extToUse = 0;
+              let intToUse = 0;
+              if (allowedExt) {
+                extToUse = Math.min((sup as any).mappedExternalBlkSizes[sz] || 0, deductAmt);
+                intToUse = deductAmt - extToUse;
+              } else {
+                intToUse = deductAmt;
+              }
+                (sup as any).mappedInternalBlkSizes[sz] -= intToUse;
+                if (allowedExt) (sup as any).mappedExternalBlkSizes[sz] -= extToUse;
+                
+                (sup as any).mappedBlkSizes[sz] -= deductAmt;
+
+                // CRITICAL: Deduct from global available BL pool so Phase 5 does not over-allocate
+                sup.internalAvailable.BL -= intToUse;
+                if (allowedExt) sup.externalAvailable.BL -= extToUse;
+                sup.available.BL -= deductAmt;
+                
+                deducted.total += deductAmt;
+              deducted.extUsed += extToUse;
+              deducted.intUsed += intToUse;
+              remainingToDeduct -= deductAmt;
            }
         }
         allocRmQty = deducted.total;
       } else {
-        deducted = deductRM(sup, rmType, allocRmQty, allowedExt);
+        if (sizeKeysToUse.length > 0) {
+          let remainingToDeduct = allocRmQty;
+          for (const sz of sizeKeysToUse) {
+             if (remainingToDeduct <= 0) break;
+             const availSz = (sup.internalSizes[sz] || 0) + (allowedExt ? (sup.externalSizes[sz] || 0) : 0);
+             const deductAmt = Math.min(availSz, remainingToDeduct);
+             if (deductAmt > 0) {
+                const res = deductRM(sup, rmType, deductAmt, allowedExt, sz);
+                deducted.total += res.total;
+                deducted.extUsed += res.extUsed;
+                deducted.intUsed += res.intUsed;
+                remainingToDeduct -= res.total;
+             }
+          }
+          allocRmQty = deducted.total;
+        } else {
+          deducted = deductRM(sup, rmType, allocRmQty, allowedExt);
+        }
       }
+
 
       const productProduced = Math.round(allocRmQty * yieldMultiplier);
       const blockProduced = allocRmQty - productProduced;
@@ -786,8 +990,8 @@ export async function executeBlPlanGeneration(
       const blockRatioInt = allocRmQty > 0 ? deducted.intUsed / allocRmQty : 1;
       const blockRatioExt = allocRmQty > 0 ? deducted.extUsed / allocRmQty : 0;
 
-      const hoursUsed = allocRmQty / icutSpeed;
-      tracker.icutUsedKg += allocRmQty;
+      const hoursUsed = productProduced / icutSpeed;
+      tracker.icutUsedKg += productProduced;
       tracker.icutUsedHours += hoursUsed;
       
       remainingQty -= productProduced;

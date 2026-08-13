@@ -1,4 +1,14 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, HttpException, HttpStatus } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Put,
+  Delete,
+  Body,
+  Param,
+  HttpException,
+  HttpStatus,
+} from '@nestjs/common';
 import { UsersService } from './users.service';
 
 @Controller('api/users')
@@ -43,7 +53,10 @@ export class UsersController {
     try {
       const success = await this.usersService.delete(id);
       if (!success) {
-        throw new HttpException('User not found or delete failed', HttpStatus.NOT_FOUND);
+        throw new HttpException(
+          'User not found or delete failed',
+          HttpStatus.NOT_FOUND,
+        );
       }
       return { success, message: 'User deleted successfully' };
     } catch (err: any) {

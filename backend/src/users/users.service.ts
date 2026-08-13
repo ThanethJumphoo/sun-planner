@@ -34,13 +34,29 @@ export class UsersService implements OnModuleInit {
 
   async findAll(): Promise<User[]> {
     return this.usersRepository.find({
-      select: ['id', 'username', 'role', 'department', 'isActive', 'createdAt', 'updatedAt'],
+      select: [
+        'id',
+        'username',
+        'role',
+        'department',
+        'isActive',
+        'createdAt',
+        'updatedAt',
+      ],
       order: { createdAt: 'DESC' },
     });
   }
 
-  async create(dto: { username: string; password?: string; role: string; department?: string; isActive?: boolean }): Promise<User> {
-    const existing = await this.usersRepository.findOne({ where: { username: dto.username } });
+  async create(dto: {
+    username: string;
+    password?: string;
+    role: string;
+    department?: string;
+    isActive?: boolean;
+  }): Promise<User> {
+    const existing = await this.usersRepository.findOne({
+      where: { username: dto.username },
+    });
     if (existing) {
       throw new Error('Username already exists');
     }
@@ -56,12 +72,23 @@ export class UsersService implements OnModuleInit {
     return this.usersRepository.save(user);
   }
 
-  async update(id: string, dto: { username?: string; password?: string; role?: string; department?: string; isActive?: boolean }): Promise<User | null> {
+  async update(
+    id: string,
+    dto: {
+      username?: string;
+      password?: string;
+      role?: string;
+      department?: string;
+      isActive?: boolean;
+    },
+  ): Promise<User | null> {
     const user = await this.usersRepository.findOne({ where: { id } });
     if (!user) return null;
 
     if (dto.username && dto.username !== user.username) {
-      const existing = await this.usersRepository.findOne({ where: { username: dto.username } });
+      const existing = await this.usersRepository.findOne({
+        where: { username: dto.username },
+      });
       if (existing) {
         throw new Error('Username already exists');
       }

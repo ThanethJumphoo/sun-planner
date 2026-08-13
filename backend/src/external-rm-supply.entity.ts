@@ -1,4 +1,10 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+} from 'typeorm';
 
 @Entity('external_rm_supplies')
 export class ExternalRmSupply {
@@ -8,10 +14,21 @@ export class ExternalRmSupply {
   @Column({ name: 'received_date', type: 'date' })
   receivedDate: Date;
 
-  @Column({ name: 'part_name', type: 'varchar', length: 50, default: 'BIL L/C' })
+  @Column({
+    name: 'part_name',
+    type: 'varchar',
+    length: 50,
+    default: 'BIL L/C',
+  })
   partName: string;
 
-  @Column({ name: 'total_weight_kg', type: 'decimal', precision: 10, scale: 2, default: 0 })
+  @Column({
+    name: 'total_weight_kg',
+    type: 'decimal',
+    precision: 10,
+    scale: 2,
+    default: 0,
+  })
   totalWeightKg: number;
 
   @Column({ name: 'vendor_name', type: 'varchar', length: 100, nullable: true })

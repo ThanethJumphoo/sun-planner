@@ -70,6 +70,9 @@ export class MpsPlan {
   })
   totalDemandKg: number;
 
+  @Column({ name: 'locked_days', type: 'nvarchar', length: 1000, nullable: true })
+  lockedDays: string; // Comma-separated locked dates
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

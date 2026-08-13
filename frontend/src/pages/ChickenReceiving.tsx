@@ -174,12 +174,18 @@ export default function ChickenReceiving() {
     } else if (activeTab === 'weekly') {
       delete payload.receive_time;
       delete payload.sublot;
+    } else if (['daily', 'actual'].includes(activeTab)) {
+      delete payload.health;
+      delete payload.batch;
     }
 
-    // Remove id from payload if POST
-    if (!formData.id) {
-      delete payload.id;
-    }
+    // Remove UI-specific layout properties
+    delete payload.topPx;
+    delete payload.colIndex;
+    delete payload.totalCols;
+
+    // Remove id from payload
+    delete payload.id;
 
     // Remove empty string fields to send null
     Object.keys(payload).forEach(key => {

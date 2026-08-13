@@ -16,7 +16,12 @@ export class TargetSyncItem {
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
-  @Column({ name: 'last_sync_status', type: 'varchar', length: 50, nullable: true })
+  @Column({
+    name: 'last_sync_status',
+    type: 'varchar',
+    length: 50,
+    nullable: true,
+  })
   lastSyncStatus: string;
 
   @Column({ name: 'last_sync_date', type: 'datetime', nullable: true })

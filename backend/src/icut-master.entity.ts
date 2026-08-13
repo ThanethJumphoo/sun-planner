@@ -1,4 +1,10 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+} from 'typeorm';
 
 @Entity('icut_master')
 export class ICutMaster {
@@ -8,7 +14,13 @@ export class ICutMaster {
   @Column({ name: 'machine_name', length: 100 })
   machineName: string;
 
-  @Column({ name: 'capacity_kg_per_hr', type: 'decimal', precision: 10, scale: 2, default: 1200 })
+  @Column({
+    name: 'capacity_kg_per_hr',
+    type: 'decimal',
+    precision: 10,
+    scale: 2,
+    default: 1200,
+  })
   capacityKgPerHr: number;
 
   @Column({ name: 'workers_per_machine', type: 'int', default: 30 })
@@ -19,10 +31,22 @@ export class ICutMaster {
   targetProductCode: string;
 
   // 80% Main product, 20% BL Block Co-product
-  @Column({ name: 'main_yield_pct', type: 'decimal', precision: 5, scale: 2, default: 0.80 })
+  @Column({
+    name: 'main_yield_pct',
+    type: 'decimal',
+    precision: 5,
+    scale: 2,
+    default: 0.8,
+  })
   mainYieldPct: number;
 
-  @Column({ name: 'coproduct_yield_pct', type: 'decimal', precision: 5, scale: 2, default: 0.20 })
+  @Column({
+    name: 'coproduct_yield_pct',
+    type: 'decimal',
+    precision: 5,
+    scale: 2,
+    default: 0.2,
+  })
   coproductYieldPct: number;
 
   @Column({ name: 'is_active', default: true })

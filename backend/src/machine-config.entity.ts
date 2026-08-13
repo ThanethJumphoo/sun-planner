@@ -1,4 +1,10 @@
-import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import {
+  Entity,
+  Column,
+  PrimaryGeneratedColumn,
+  CreateDateColumn,
+  UpdateDateColumn,
+} from 'typeorm';
 
 @Entity('machine_config')
 export class MachineConfig {
@@ -17,7 +23,13 @@ export class MachineConfig {
   @Column({ name: 'CAPACITY_PCS_PER_HOUR', type: 'int', default: 0 })
   capacityPcsPerHour: number;
 
-  @Column({ name: 'YIELD_PERCENTAGE', type: 'decimal', precision: 5, scale: 4, default: 1.0 })
+  @Column({
+    name: 'YIELD_PERCENTAGE',
+    type: 'decimal',
+    precision: 5,
+    scale: 4,
+    default: 1.0,
+  })
   yieldPercentage: number;
 
   @Column({ name: 'DEFAULT_LINES', type: 'int', default: 1 })

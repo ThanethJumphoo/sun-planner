@@ -1,1 +1,0 @@
-const sql = require('mssql'); async function run() { try { await sql.connect('mssql://sa:Your_password123@127.0.0.1:1433/sun_planner'); const result = await sql.query("SELECT * FROM chicken_receiving_history WHERE receive_date >= '2026-05-01' AND receive_date <= '2026-05-05'"); console.dir(result.recordset); sql.close(); } catch(e) { console.error(e); } } run();

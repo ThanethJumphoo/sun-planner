@@ -42,7 +42,9 @@ export class ProductSpecController {
     });
 
     // Enrich description from StgErpItem if missing
-    const specCodes = [...new Set(specs.map(s => s.erpItemCode).filter(c => c))];
+    const specCodes = [
+      ...new Set(specs.map((s) => s.erpItemCode).filter((c) => c)),
+    ];
     let items: any[] = [];
     if (specCodes.length > 0) {
       const chunkSize = 500;
@@ -50,7 +52,7 @@ export class ProductSpecController {
         const chunkCodes = specCodes.slice(i, i + chunkSize);
         const chunkItems = await this.stgItemRepo.find({
           where: { erpItemCode: In(chunkCodes) },
-          select: ['erpItemCode', 'erpItemDesc']
+          select: ['erpItemCode', 'erpItemDesc'],
         });
         items = items.concat(chunkItems);
       }
@@ -162,9 +164,12 @@ export class ProductSpecController {
       spec.productWeight = body.productWeight;
     if (body.productSpeed !== undefined) spec.productSpeed = body.productSpeed;
     if (body.icutSpeed !== undefined) spec.icutSpeed = body.icutSpeed;
-    if (body.minProductLead !== undefined) spec.minProductLead = body.minProductLead;
-    if (body.maxProductLead !== undefined) spec.maxProductLead = body.maxProductLead;
-    if (body.isExternalRmAllowed !== undefined) spec.isExternalRmAllowed = body.isExternalRmAllowed;
+    if (body.minProductLead !== undefined)
+      spec.minProductLead = body.minProductLead;
+    if (body.maxProductLead !== undefined)
+      spec.maxProductLead = body.maxProductLead;
+    if (body.isExternalRmAllowed !== undefined)
+      spec.isExternalRmAllowed = body.isExternalRmAllowed;
 
     const saved = await this.productSpecRepo.save(spec);
     return { success: true, data: saved };
@@ -287,8 +292,7 @@ export class ProductSpecController {
           existing.productWeight = row.productWeight;
         if (row.productSpeed !== undefined)
           existing.productSpeed = row.productSpeed;
-        if (row.icutSpeed !== undefined)
-          existing.icutSpeed = row.icutSpeed;
+        if (row.icutSpeed !== undefined) existing.icutSpeed = row.icutSpeed;
         if (row.minProductLead !== undefined)
           existing.minProductLead = row.minProductLead;
         if (row.maxProductLead !== undefined)

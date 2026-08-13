@@ -34,7 +34,7 @@ export async function executeUnifiedLegPlanGeneration(
   // For now, let's assume we manage a combined plan named "LEG".
   const existingApproved = await manager.findOne(MpsPlan, { where: { targetMonth, partType: 'leg', status: 'APPROVED' } });
   if (existingApproved) {
-    return { success: false, message: `มีแผน LEG ที่ APPROVED แล้วสำหรับเดือน ${targetMonth} ต้อง Reject ก่อนถึงจะสร้างใหม่ได้` };
+    return { success: false, message: `เธกเธตเนเธเธ LEG เธ—เธตเน APPROVED เนเธฅเนเธงเธชเธณเธซเธฃเธฑเธเน€เธ”เธทเธญเธ ${targetMonth} เธ•เนเธญเธ Reject เธเนเธญเธเธ–เธถเธเธเธฐเธชเธฃเนเธฒเธเนเธซเธกเนเนเธ”เน` };
   }
 
   let plan = await manager.findOne(MpsPlan, { where: { targetMonth, partType: 'leg', status: 'DRAFT' } });
@@ -78,6 +78,8 @@ export async function executeUnifiedLegPlanGeneration(
     rmBlUsed: number;
     legSizes: Record<string, number>;
     blSizes: Record<string, number>;
+    blkSizes: Record<string, number>;
+    mappedBlkSizes: Record<string, number>;
     intakeBirds: number;
     totalWeight: number;
   }>();
@@ -129,6 +131,7 @@ export async function executeUnifiedLegPlanGeneration(
     if (dailyIntakeBirds > 0) {
       let dailyLegRm = 0;
       const sizeBins: Record<string, number> = {};
+      const blkSizes: Record<string, number> = {};
 
       dayIntakes.forEach((intake: any) => {
         const intakeKg = Number(intake.chicken_weight || 0);
@@ -156,6 +159,7 @@ export async function executeUnifiedLegPlanGeneration(
           const kg = Math.round(legWeightForIntake * pct);
           if (row.colLabel) {
             sizeBins[row.colLabel] = (sizeBins[row.colLabel] || 0) + kg;
+            blkSizes[row.colLabel] = (blkSizes[row.colLabel] || 0) + (kg * 0.25);
           }
         });
       });
@@ -168,6 +172,8 @@ export async function executeUnifiedLegPlanGeneration(
         rmBlUsed: 0,
         legSizes: sizeBins,
         blSizes: { 'TOTAL_BL_BLOCK': 0 },
+        blkSizes,
+        mappedBlkSizes: {},
         intakeBirds: dailyIntakeBirds,
         totalWeight: dailyTotalWeight,
       });
@@ -199,6 +205,53 @@ export async function executeUnifiedLegPlanGeneration(
 
   const blBeltGateMatrix = await manager.getRepository(BlBeltGateMatrix).find();
 
+  // --- Map BLK Sizes Using Matrix ---
+  for (const [dateStr, sup] of supplyMap.entries()) {
+    for (const [rmSz, qty] of Object.entries(sup.blkSizes || {})) {
+      if (qty <= 0) continue;
+      
+      let remainingQty = qty;
+      const r2 = rmSz.match(/(\d+)\s*-\s*(\d+)/);
+      const min2 = r2 ? Number(r2[1]) : 0;
+      const max2 = r2 ? Number(r2[2]) : (rmSz.toLowerCase().includes('down') ? 180 : (rmSz.toLowerCase().includes('up') ? 999 : 0));
+      const rangeWidth2 = max2 > min2 ? max2 - min2 : 1;
+      
+      for (const rule of blBeltGateMatrix || []) {
+        if (remainingQty <= 0) break;
+        
+        let overlapRatio = 0;
+        if (rule.rmSize === rmSz) {
+            overlapRatio = 1.0;
+        } else {
+            const r1 = rule.rmSize.match(/(\d+)\s*-\s*(\d+)/);
+            if (r1 && (r2 || max2 > 0)) {
+               const min1 = Number(r1[1]), max1 = Number(r1[2]);
+               
+               if (min1 <= max2 && min2 <= max1) {
+                  const overlapMin = Math.max(min1, min2);
+                  const overlapMax = Math.min(max1, max2);
+                  const overlapWidth = overlapMax - overlapMin;
+                  overlapRatio = overlapWidth / rangeWidth2;
+                  if (overlapRatio > 1.0) overlapRatio = 1.0;
+               }
+            }
+        }
+        
+        if (overlapRatio > 0) {
+           const allocateQty = remainingQty * overlapRatio;
+           const targetQty = allocateQty * Number(rule.yieldPct || 100) / 100.0;
+           const targetSz = rule.targetProduct;
+           sup.mappedBlkSizes[targetSz] = (sup.mappedBlkSizes[targetSz] || 0) + targetQty;
+           remainingQty -= allocateQty;
+        }
+      }
+      
+      if (remainingQty > 0.01) {
+         sup.mappedBlkSizes[rmSz] = (sup.mappedBlkSizes[rmSz] || 0) + remainingQty;
+      }
+    }
+  }
+
   // --- Load Machine Configs for dynamic Debone Capacity ---
   const getMachineConfig = (key: string, defaults: any) => {
     const conf = deps.machineConfigs.find(c => c.machineKey === key);
@@ -221,13 +274,14 @@ export async function executeUnifiedLegPlanGeneration(
   const toridasPcsPerDay = toridasConf.lines * toridasConf.machinesPerLine * toridasConf.speed * HOURS_PER_SHIFT * SHIFTS_PER_DAY;
   const foodmatePcsPerDay = foodmateConf.lines * foodmateConf.machinesPerLine * foodmateConf.speed * HOURS_PER_SHIFT * SHIFTS_PER_DAY;
 
-  // Need avgPieceWeight to convert pcs → Kg. Use supplyMap to estimate.
+  // Need avgPieceWeight to convert pcs โ’ Kg. Use supplyMap to estimate.
   // Average leg piece weight = totalWeight / intakeBirds * 2 (2 legs per bird) * legYieldPct * slaughter yield
   // Simplified: just use the total RM available as the real capacity cap, 
   // and compute a reasonable Kg limit from machine configs.
   // Typical avg piece ~0.25 kg (250g per BL piece), so:
   const AVG_BL_PIECE_WEIGHT_KG = 0.25;
-  const toridasKgPerDay = Math.round(toridasPcsPerDay * AVG_BL_PIECE_WEIGHT_KG * toridasConf.yield);
+  const defectFactor = 0.75;
+  const toridasKgPerDay = Math.round(toridasPcsPerDay * AVG_BL_PIECE_WEIGHT_KG * toridasConf.yield * defectFactor);
   const foodmateKgPerDay = Math.round(foodmatePcsPerDay * AVG_BL_PIECE_WEIGHT_KG * foodmateConf.yield);
   const DEBONE_CAPACITY_KG_PER_DAY = toridasKgPerDay + foodmateKgPerDay;
 
@@ -249,7 +303,7 @@ export async function executeUnifiedLegPlanGeneration(
   };
 
   const bilCategoryNames = ['BIL L/C', 'BIL S/C'];
-  const blCategoryNames = ['BL Processing', 'RM: BL (ทั้งชิ้น)', 'RM: BLDR (น่อง)', 'RM: BLT (สะโพก)'];
+  const blCategoryNames = ['BL Processing', 'RM: BL (เธ—เธฑเนเธเธเธดเนเธ)', 'RM: BLDR (เธเนเธญเธ)', 'RM: BLT (เธชเธฐเนเธเธ)'];
 
   const bilCategoryNodes = allYieldNodes.filter((n: any) => 
     (n.type === 'CATEGORY' || n.type === 'ROOT') && bilCategoryNames.includes(n.name)
@@ -313,7 +367,7 @@ export async function executeUnifiedLegPlanGeneration(
   };
 
   // Helper functions for BL detailed processing
-  const extractBeltGateSizes = (desc: string, specSize?: string): { rmSizes: string[], targetProduct: string, yieldPct: number } | null => {
+  const extractBeltGateSizes = (desc: string, specSize?: string, forClassification: boolean = false): { rmSizes: string[], targetProduct: string, yieldPct: number } | null => {
     for (const rule of blBeltGateMatrix as any[]) {
       if (desc.includes(rule.targetProduct)) {
         return { rmSizes: [rule.rmSize], targetProduct: rule.targetProduct, yieldPct: Number(rule.yieldPct || 100) };
@@ -322,11 +376,11 @@ export async function executeUnifiedLegPlanGeneration(
     
     let sToUse = specSize;
     if (!sToUse || sToUse.toLowerCase() === 'unsize' || sToUse.trim() === '') {
-      const descMatch = desc.match(/(\d+)\s*[-–]\s*(\d+)/);
+      const descMatch = desc.match(/(\d+)\s*[-โ€“]\s*(\d+)/);
       if (descMatch) {
         sToUse = descMatch[0];
       } else {
-        const descSingle = desc.match(/\b(\d{2,4})\s*(g|กรัม|g\.|gram)\b/i);
+        const descSingle = desc.match(/\b(\d{2,4})\s*(g|เธเธฃเธฑเธก|g\.|gram)\b/i);
         if (descSingle) sToUse = descSingle[1];
       }
     }
@@ -351,11 +405,19 @@ export async function executeUnifiedLegPlanGeneration(
       ];
       
       let lo = -1, hi = -1;
-      const m = s.match(/(\d+)\s*[-–]\s*(\d+)/);
-      if (m) { lo = parseInt(m[1], 10); hi = parseInt(m[2], 10); }
-      else {
-        const singleMatch = s.match(/^(\d+)$/);
-        if (singleMatch) { lo = parseInt(singleMatch[1], 10); hi = parseInt(singleMatch[1], 10); }
+      if (s.includes('down')) {
+        const m = s.match(/(\d+)/);
+        if (m) { lo = 0; hi = parseInt(m[1], 10); }
+      } else if (s.includes('up')) {
+        const m = s.match(/(\d+)/);
+        if (m) { lo = parseInt(m[1], 10); hi = 9999; }
+      } else {
+        const m = s.match(/(\d+)\s*[-โ€“]\s*(\d+)/);
+        if (m) { lo = parseInt(m[1], 10); hi = parseInt(m[2], 10); }
+        else {
+          const singleMatch = s.match(/^(\d+)$/);
+          if (singleMatch) { lo = parseInt(singleMatch[1], 10); hi = parseInt(singleMatch[1], 10); }
+        }
       }
 
       if (lo >= 0 && hi >= 0 && hi >= lo) {
@@ -365,6 +427,8 @@ export async function executeUnifiedLegPlanGeneration(
         });
         if (overlaps.length > 0) {
           return { rmSizes: overlaps.map(b => b.key), targetProduct: `Fallback (${sToUse})`, yieldPct: 100 };
+        } else if (!forClassification) {
+          return { rmSizes: [`BL ${sToUse.toUpperCase()}`], targetProduct: `Fallback (${sToUse})`, yieldPct: 100 };
         }
       }
     }
@@ -377,24 +441,24 @@ export async function executeUnifiedLegPlanGeneration(
     
     let classification = 'MANUAL_TRIM'; // Default
     
-    // CO-PRODUCT (e.g. BL BLOCK) → 'BL_BLOCK'
+    // CO-PRODUCT (e.g. BL BLOCK) โ’ 'BL_BLOCK'
     if (type === 'CO_PRODUCT') {
       classification = 'BL_BLOCK';
     }
-    // I-Cut process → check process name
+    // I-Cut process โ’ check process name
     else if (process.toLowerCase().includes('i-cut') || process.toLowerCase().includes('icut')) {
       classification = 'ICUT';
     }
-    // Manual Trimming → 'MANUAL_TRIM'
-    else if (process.toLowerCase().includes('manual') || process.toLowerCase().includes('คนตัด')) {
+    // Manual Trimming โ’ 'MANUAL_TRIM'
+    else if (process.toLowerCase().includes('manual') || process.toLowerCase().includes('เธเธเธ•เธฑเธ”')) {
       classification = 'MANUAL_TRIM';
     }
     else {
       // Belt Gate matrix fallback (for special BLK sizing)
       const desc = ((spec as any)?.erpItemDesc || order.erpOrderItemCode || '').toUpperCase();
-      if (extractBeltGateSizes(desc, (spec as any)?.productSize)) classification = 'ICUT';
+      if (extractBeltGateSizes(desc, (spec as any)?.productSize, true)) classification = 'ICUT';
       
-      // If it has icutSpeed > 0 in spec → I-Cut
+      // If it has icutSpeed > 0 in spec โ’ I-Cut
       else if (Number((spec as any)?.icutSpeed || 0) > 0) classification = 'ICUT';
     }
     
@@ -677,6 +741,7 @@ export async function executeUnifiedLegPlanGeneration(
   // Track capacities per day (e.g. Deboning machine limits)
   const capacityTracker = new Map<string, { debonedKg: number }>();
   const unfulfilledMainOrders: any[] = [];
+  const dateUsedByItem = new Map<string, Set<string>>(); // Track used dates per itemCode to prevent mixing SOs
 
   const allocateMainOrders = (ordersToProcess: any[], listName: string = 'unknown') => {
     console.log(`[DEBUG LEG] allocateMainOrders called for ${listName} with ${ordersToProcess.length} orders.`);
@@ -694,13 +759,19 @@ export async function executeUnifiedLegPlanGeneration(
       const minLead = (spec as any)?.minProductLead ?? 1;
       const maxLead = (spec as any)?.maxProductLead ?? 3;
       
+      if (!dateUsedByItem.has(order.erpOrderItemCode)) {
+        dateUsedByItem.set(order.erpOrderItemCode, new Set());
+      }
+      const usedDatesForThisItem = dateUsedByItem.get(order.erpOrderItemCode)!;
+
       let remainingQty = Number(order.erpOrderItemQty || 0);
       if (remainingQty <= 0) continue;
       
       const shipDate = new Date(order.erpOrderShipDate);
 
       // Yield logic: BIL = 100% (1:1), BL = Toridas yield from config (usually 75%)
-      const rmYieldPct = isBl ? toridasConf.yield : 1.0; 
+      const defectFactor = 0.75; // Added defect factor as requested
+      const rmYieldPct = isBl ? toridasConf.yield * defectFactor : 1.0; 
 
       // Find the best production date (backward scheduling)
       for (let leadDay = minLead; leadDay <= maxLead; leadDay++) {
@@ -709,6 +780,11 @@ export async function executeUnifiedLegPlanGeneration(
         const prodDate = new Date(shipDate.getTime());
         prodDate.setDate(prodDate.getDate() - leadDay);
         const dateStr = formatDate(prodDate);
+
+        // Do not mix multiple SOs of the same item on the same day (Sequential Waterfall)
+        if (usedDatesForThisItem.has(dateStr)) {
+           continue;
+        }
         
         const sup = supplyMap.get(dateStr);
         if (!sup) continue;
@@ -926,9 +1002,10 @@ export async function executeUnifiedLegPlanGeneration(
            capacityTracker.set(dateStr, capTracker);
         }
 
-        if (productProduced <= 0) continue;
-
-        remainingQty -= productProduced;
+        if (productProduced > 0) {
+           remainingQty -= productProduced;
+           usedDatesForThisItem.add(dateStr); 
+        } 
 
         // Save Allocation
         mpsOrdersToSave.push(manager.create(MpsPlanOrder, {
@@ -1344,7 +1421,8 @@ export async function executeUnifiedLegPlanGeneration(
 
     const tracker = getTracker(dayStr);
     const debonedKg = (capacityTracker.get(dayStr) || { debonedKg: 0 }).debonedKg;
-    const blRmTotal = debonedKg * toridasConf.yield;
+    const defectFactor = 0.75; // Added defect factor as requested
+    const blRmTotal = debonedKg * toridasConf.yield * defectFactor;
 
     const intRatio = initialSup.totalLegRm > 0 ? initialSup.internalLegRm / initialSup.totalLegRm : 1;
     const extRatio = initialSup.totalLegRm > 0 ? initialSup.externalLegRm / initialSup.totalLegRm : 0;
@@ -1390,6 +1468,7 @@ export async function executeUnifiedLegPlanGeneration(
           blDr: 0,
         },
         beltGateSizes: supplyMap.get(dayStr)?.blSizes || {},
+        blkSizes: supplyMap.get(dayStr)?.blkSizes || {},
       }),
     }));
 
@@ -1399,6 +1478,17 @@ export async function executeUnifiedLegPlanGeneration(
         sizesToSave.push(manager.create(MpsPlanSupplySize, {
           groupSize: sz,
           partName: 'BIL L/C',
+          quantityKg: kg as number,
+          productionDate: prodDate,
+        }));
+      }
+
+      console.log(`[DEBUG] dayStr=${dayStr}, mappedBlkSizes:`, supplyMap.get(dayStr)?.mappedBlkSizes, `blkSizes:`, supplyMap.get(dayStr)?.blkSizes);
+      for (const [sz, kg] of Object.entries(supplyMap.get(dayStr)?.mappedBlkSizes || {})) {
+        if (Number(kg) <= 0) continue;
+        sizesToSave.push(manager.create(MpsPlanSupplySize, {
+          groupSize: sz,
+          partName: 'BLK',
           quantityKg: kg as number,
           productionDate: prodDate,
         }));
@@ -1435,7 +1525,7 @@ export async function executeUnifiedLegPlanGeneration(
   }
 
   if (mpsSuppliesToSave.length > 0) {
-    const saveChunkSize = 50;
+    const saveChunkSize = 5; // Reduced from 50 to 5 to avoid 2100 parameter limit due to cascaded MpsPlanSupplySize
     for (let k = 0; k < mpsSuppliesToSave.length; k += saveChunkSize) {
       await manager.save(mpsSuppliesToSave.slice(k, k + saveChunkSize));
     }

@@ -1,4 +1,12 @@
-import { Controller, Get, Post, Delete, Body, Param, Query } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Delete,
+  Body,
+  Param,
+  Query,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { TargetSyncItem } from './target-sync-item.entity';
@@ -61,7 +69,7 @@ export class ErpIntegrationController {
 
     const syncedItems = await this.oracleService.syncItems(codes);
     const syncedCodes = new Set(syncedItems.map((i: any) => i.erpItemCode));
-    
+
     // Update sync status
     for (const item of items) {
       item.lastSyncDate = new Date();
@@ -157,5 +165,26 @@ export class ErpIntegrationController {
   @Delete('manual-order/:id')
   async deleteManualOrder(@Param('id') id: number) {
     return this.oracleService.deleteManualOrder(id);
+  }
+
+  // Get recipes for an item
+  @Get('recipes/:itemCode')
+  async getRecipes(@Param('itemCode') itemCode: string) {
+    return this.oracleService.getRecipesByItemCode(itemCode);
+  }
+
+  // Create auto batch by inserting to Oracle ERP
+  @Post('batch-auto')
+  async createAutoBatch(@Body() body: { recipes: { recipeNo: string, recipeVersion: number | string }[], partId: string, planDate: string }) {
+    if (!body || !body.recipes || !body.partId || !body.planDate) {
+      return { success: false, message: 'Missing required parameters (recipes, partId, planDate)' };
+    }
+    return this.oracleService.createAutoBatch(body.recipes, body.partId, body.planDate);
+  }
+
+  // Get batch logs for a specific plan date and part id
+  @Get('batch-logs/:partId/:planDate')
+  async getBatchLogs(@Param('partId') partId: string, @Param('planDate') planDate: string) {
+    return this.oracleService.getBatchLogs(partId, planDate);
   }
 }

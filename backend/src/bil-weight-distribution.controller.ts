@@ -31,7 +31,13 @@ export class BilWeightDistributionController {
       }
     }
 
-    return { rowLabels, colLabels, blColLabelsMap, matrix, totalRecords: rows.length };
+    return {
+      rowLabels,
+      colLabels,
+      blColLabelsMap,
+      matrix,
+      totalRecords: rows.length,
+    };
   }
 
   // ─── Bulk save (Delete all & re-insert) ───

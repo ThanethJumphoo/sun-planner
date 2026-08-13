@@ -1,6 +1,7 @@
-import { Entity, Column, PrimaryGeneratedColumn } from 'typeorm';
+import { Entity, Column, PrimaryGeneratedColumn, Index } from 'typeorm';
 
 @Entity('stg_erp_order_lines')
+@Index(['erpOrderLineId', 'erpOrgId'], { unique: true })
 export class StgErpOrderLine {
   @PrimaryGeneratedColumn()
   id: number;

@@ -65,7 +65,6 @@ const MPSPlan: React.FC = () => {
     }, 200);
     return () => clearInterval(interval);
   }, [loading, loadingStartTime]);
-  const [draggedOrderId, setDraggedOrderId] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<'calendar' | 'drafts' | 'demand'>('calendar');
   const [machineConfigs, setMachineConfigs] = useState<any[]>([]);
@@ -108,7 +107,7 @@ const MPSPlan: React.FC = () => {
         traverse(tree);
         setYieldTree(flatNodes);
       }
-      
+
       const nodesRes = await fetch(`${API}/api/master-yield/nodes`);
       if (nodesRes.ok) {
         const allNodes = await nodesRes.json();
@@ -135,15 +134,141 @@ const MPSPlan: React.FC = () => {
   };
   const [generateRange, setGenerateRange] = useState({ startDate: getDefaultStartDate(), endDate: getDefaultEndDate() });
 
-  const [splitModal, setSplitModal] = useState<{
+  const [moveModal, setMoveModal] = useState<{
     isOpen: boolean;
-    orderId: string | null;
+    sourceDate: string;
     targetDate: string;
-    maxQty: number;
-    qtyToMove: string;
-    orderDesc?: string;
-    soNumber?: string;
-  }>({ isOpen: false, orderId: null, targetDate: '', maxQty: 0, qtyToMove: '' });
+    itemCode: string;
+    itemDesc: string;
+    orders: any[];
+  }>({ isOpen: false, sourceDate: '', targetDate: '', itemCode: '', itemDesc: '', orders: [] });
+
+  
+  const computeUnassignedOrders = () => {
+    const allAssigned: Record<string, number> = {};
+    if (currentPlan && currentPlan.orders) {
+      currentPlan.orders.forEach((o: any) => {
+        if (o.stgLineId) {
+           allAssigned[o.stgLineId] = (allAssigned[o.stgLineId] || 0) + Number(o.quantityKg || o.qty || 0);
+        }
+      });
+    }
+    
+    const unassigned: any[] = [];
+    demandOrders.forEach((header: any) => {
+      header.lines?.forEach((line: any) => {
+         if (!allowedItemCodes.includes(line.erpOrderItemCode)) return;
+         
+         const totalQty = Number(line.erpOrderItemQty || 0);
+         const assigned = allAssigned[line.erpOrderLineId] || 0;
+         const remaining = totalQty - assigned;
+         
+         if (remaining > 0.5) {
+           unassigned.push({
+             ...line,
+             soNumber: header.erpOrderNumber || header.erpOrderHeaderId || header.soNumber,
+             shipDate: line.erpOrderShipDate || header.shipDate,
+             itemCode: line.erpOrderItemCode,
+             itemDesc: line.erpItemDesc,
+             remainingQty: remaining,
+             pullQty: Math.round(remaining).toString()
+           });
+         }
+      });
+    });
+    return unassigned.sort((a, b) => new Date(a.shipDate).getTime() - new Date(b.shipDate).getTime());
+  };
+
+  const [showManualPull, setShowManualPull] = useState(false);
+  const [unassignedList, setUnassignedList] = useState<any[]>([]);
+  const [manualPullSearch, setManualPullSearch] = useState('');
+  const [manualPullPage, setManualPullPage] = useState(1);
+
+  const handleOpenManualPull = () => {
+    setUnassignedList(computeUnassignedOrders());
+    setShowManualPull(true);
+  };
+
+  const handlePullOrder = async (order: any) => {
+    const pullQty = parseFloat(order.pullQty);
+    if (isNaN(pullQty) || pullQty <= 0 || pullQty > order.remainingQty) {
+      alert('Invalid pull quantity.');
+      return;
+    }
+
+    setLoading(true);
+    setLoadingStartTime(Date.now());
+    setLoadingPhase({ mode: 'loading', step: 1, message: 'Pulling order...' });
+    
+    try {
+      const res = await fetch(`${API}/api/mps/pull-order`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          planId: currentPlan.id,
+          stgLineId: order.erpOrderLineId,
+          date: selectedDate,
+          pullQty: pullQty,
+          itemCode: order.itemCode,
+          itemDesc: order.itemName || order.itemDesc || '',
+          soNumber: order.soNumber,
+          shipDate: order.shipDate,
+          type: order.type || 'frozen'
+        })
+      });
+      
+      if (res.ok) {
+         setLoadingPhase({ mode: 'loading', step: 2, message: 'Reloading plan details...' });
+         const planRes = await fetch(`${API}/api/mps/plans/${currentPlan.id}`);
+         if (planRes.ok) {
+           const json = await planRes.json();
+           if (json.success) {
+             setCurrentPlan(json.data);
+             // Update the selectedDailyOrders so the modal updates immediately
+             const newOrders = json.data.orders.filter((o: any) => o.planDate === selectedDate);
+             setSelectedDailyOrders(newOrders);
+             
+             // Also recalculate unassigned list
+             setTimeout(() => {
+                const updatedAssigned: Record<string, number> = {};
+                json.data.orders.forEach((o: any) => {
+                  if (o.stgLineId) {
+                     updatedAssigned[o.stgLineId] = (updatedAssigned[o.stgLineId] || 0) + Number(o.quantityKg || o.qty || 0);
+                  }
+                });
+                
+                const unassigned: any[] = [];
+                demandOrders.forEach((header: any) => {
+                  header.lines?.forEach((line: any) => {
+                     if (!allowedItemCodes.includes(line.erpOrderItemCode)) return;
+                     const totalQty = Number(line.erpOrderItemQty || 0);
+                     const assigned = updatedAssigned[line.erpOrderLineId] || 0;
+                     const remaining = totalQty - assigned;
+                     if (remaining > 0.5) {
+                       unassigned.push({
+                         ...line,
+                         soNumber: header.erpOrderNumber || header.erpOrderHeaderId || header.soNumber,
+                         shipDate: line.erpOrderShipDate || header.shipDate,
+                         itemCode: line.erpOrderItemCode,
+                         itemDesc: line.erpItemDesc,
+                         remainingQty: remaining,
+                         pullQty: Math.round(remaining).toString()
+                       });
+                     }
+                  });
+                });
+                setUnassignedList(unassigned.sort((a, b) => new Date(a.shipDate).getTime() - new Date(b.shipDate).getTime()));
+             }, 100);
+           }
+         }
+      }
+      setLoadingPhase({ mode: 'loading', step: 4, message: 'Complete!' });
+      setTimeout(() => setLoading(false), 300);
+    } catch (err) {
+      console.error(err);
+      setLoading(false);
+    }
+  };
 
   React.useEffect(() => {
     // Also reset to current month whenever partId changes, as requested
@@ -265,7 +390,7 @@ const MPSPlan: React.FC = () => {
   };
 
 
-  
+
   const renderDemandByYieldTreeGroup = (
     title: string,
     themeColor: string,
@@ -310,7 +435,7 @@ const MPSPlan: React.FC = () => {
       const sInfo = byProductsSupply[key];
       if (sInfo && sInfo.qty > 0) {
         let nodeType = yieldNodeTypeMap.get(key) || yieldNodeTypeMap.get(key.toLowerCase()) || yieldNodeTypeMap.get(key.toUpperCase());
-        
+
         // Fallback if nodeType is missing from tree map (e.g. deep nodes)
         if (!nodeType) {
           const foundSpec: any = Object.values(specs).find((s: any) =>
@@ -321,8 +446,8 @@ const MPSPlan: React.FC = () => {
             if (specType === 'coproduct') nodeType = 'CO-PRODUCT';
             if (specType === 'byproduct') nodeType = 'BY-PRODUCT';
           } else if (sInfo.processName === 'BIL L/C' || sInfo.processName === 'Debone Process') {
-             // Heuristic: Process 3 typically yields by-products
-             nodeType = 'BY-PRODUCT';
+            // Heuristic: Process 3 typically yields by-products
+            nodeType = 'BY-PRODUCT';
           }
         }
 
@@ -396,20 +521,21 @@ const MPSPlan: React.FC = () => {
                     {ords.map((ord: any, idx: number) => {
                       const spec = specs[ord.itemCode];
                       return (
-                      <div key={idx} className="flex items-center gap-2 text-[11px] py-1 px-2 bg-white/80 rounded border border-gray-100">
-                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${ord.type === 'chilled' ? 'bg-orange-100 text-orange-700' : 'bg-cyan-100 text-cyan-700'}`}>
-                          {ord.type === 'chilled' ? 'C' : 'F'}
-                        </span>
-                        {Number(spec?.icutSpeed) > 0 && (
-                          <span className="px-1 py-0.5 rounded text-[8px] font-bold bg-indigo-100 text-indigo-700 border border-indigo-200 uppercase tracking-tighter">
-                            I-CUT
+                        <div key={idx} className="flex items-center gap-2 text-[11px] py-1 px-2 bg-white/80 rounded border border-gray-100">
+                          <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${ord.type === 'chilled' ? 'bg-orange-100 text-orange-700' : 'bg-cyan-100 text-cyan-700'}`}>
+                            {ord.type === 'chilled' ? 'C' : 'F'}
                           </span>
-                        )}
-                        <span className="font-bold text-gray-700">{ord.soNumber}</span>
-                        <span className="text-gray-400 text-[10px]">{ord.itemCode}</span>
-                        <span className="ml-auto font-bold text-gray-900">{Math.round(ord.qty).toLocaleString()} kg</span>
-                      </div>
-                    )})}
+                          {Number(spec?.icutSpeed) > 0 && (
+                            <span className="px-1 py-0.5 rounded text-[8px] font-bold bg-indigo-100 text-indigo-700 border border-indigo-200 uppercase tracking-tighter">
+                              I-CUT
+                            </span>
+                          )}
+                          <span className="font-bold text-gray-700">{ord.soNumber}</span>
+                          <span className="text-gray-400 text-[10px]">{ord.itemCode}</span>
+                          <span className="ml-auto font-bold text-gray-900">{Math.round(ord.qty).toLocaleString()} kg</span>
+                        </div>
+                      )
+                    })}
                   </div>
                 )}
               </div>
@@ -420,7 +546,7 @@ const MPSPlan: React.FC = () => {
     );
   };
 
-const isMainProductSpec = (itemCode: string): boolean => {
+  const isMainProductSpec = (itemCode: string): boolean => {
     const type = getProductType(itemCode);
     return type === 'main';
   };
@@ -431,7 +557,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
       const month = currentMonth.getMonth();
       const shipStartDate = new Date(year, month - 3, 1).toISOString();
       const shipEndDate = new Date(year, month + 2, 0).toISOString();
-      
+
       const res = await fetch(`${API}/api/erp/demand-orders?shipStartDate=${shipStartDate}&shipEndDate=${shipEndDate}`);
       if (res.ok) {
         const data = await res.json();
@@ -553,7 +679,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
           const json = await res.json();
           if (json.success) {
             setCurrentPlan(json.data);
-            
+
             try {
               const wRes = await fetch(`${API}/api/chicken-receiving/weekly`);
               if (wRes.ok) {
@@ -575,7 +701,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
             } catch (err) {
               console.error('Failed to fetch weekly intakes', err);
             }
-            
+
             return;
           }
         }
@@ -585,6 +711,30 @@ const isMainProductSpec = (itemCode: string): boolean => {
     }
     setCurrentPlan(null);
     setWeeklyDates(new Set());
+  };
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const handleToggleLock = async (date: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (currentPlan?.status === 'APPROVED') return;
+    
+    const lockedArr = currentPlan.lockedDays ? currentPlan.lockedDays.split(',') : [];
+    const isLocked = lockedArr.includes(date);
+    const newIsLocked = !isLocked;
+    
+    try {
+      const res = await fetch(`${API}/api/mps/plans/${currentPlan.id}/lock-day`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date, isLocked: newIsLocked })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setCurrentPlan((prev: any) => ({ ...prev, lockedDays: data.lockedDays }));
+      }
+    } catch (err) {
+      console.error(err);
+    }
   };
 
   const handleDeletePlan = async (id: number) => {
@@ -684,9 +834,8 @@ const isMainProductSpec = (itemCode: string): boolean => {
   });
 
   // --- Drag and Drop Handlers ---
-  const handleDragStart = (e: React.DragEvent, orderId: string) => {
-    setDraggedOrderId(orderId);
-    e.dataTransfer.setData('text/plain', orderId);
+  const handleDragStart = (e: React.DragEvent, groupData: any) => {
+    e.dataTransfer.setData('application/json', JSON.stringify(groupData));
     e.dataTransfer.effectAllowed = 'move';
   };
 
@@ -697,68 +846,92 @@ const isMainProductSpec = (itemCode: string): boolean => {
 
   const handleDrop = async (e: React.DragEvent, date: string) => {
     e.preventDefault();
-    // Lock guard: prevent drag-drop on approved plans
     if (currentPlan?.status === 'APPROVED') {
       alert('This plan is approved and locked. Cannot modify.');
       return;
     }
-
-    if (draggedOrderId && currentPlan) {
-      const orderIds = draggedOrderId.split(',');
-      const mpsOrderId = parseInt(orderIds[0]);
-
-      if (mpsOrderId) {
-        // Find the order to get its current qty
-        const orderToMove = currentPlan.orders.find((o: any) => o.id === mpsOrderId);
-        if (orderToMove) {
-          // The backend returns quantityKg for orders, but metric mapping might have mapped it to qty
-          // Let's use the raw quantityKg if available, or qty
-          const currentQty = orderToMove.quantityKg || orderToMove.qty || 0;
-
-          setSplitModal({
-            isOpen: true,
-            orderId: draggedOrderId,
-            targetDate: date,
-            maxQty: currentQty,
-            qtyToMove: String(currentQty),
-            orderDesc: orderToMove.itemDesc,
-            soNumber: orderToMove.soNumber
-          });
-        }
+    
+    try {
+      const dataStr = e.dataTransfer.getData('application/json');
+      if (dataStr) {
+        const data = JSON.parse(dataStr);
+        setMoveModal({
+          isOpen: true,
+          sourceDate: data.sourceDate,
+          targetDate: date,
+          itemCode: data.itemCode,
+          itemDesc: data.itemDesc,
+          orders: data.orders.map((o: any) => ({
+             ...o,
+             selected: false,
+             moveQty: String(o.qty)
+          }))
+        });
       }
-      setDraggedOrderId(null);
-    }
+    } catch(err) {}
   };
 
-  const handleConfirmSplitMove = async () => {
-    if (!splitModal.orderId) return;
-
-    const qtyNum = parseFloat(splitModal.qtyToMove);
-    if (isNaN(qtyNum) || qtyNum <= 0 || qtyNum > splitModal.maxQty) {
-      alert("Invalid quantity. Must be greater than 0 and less than or equal to the maximum available quantity.");
+  const handleConfirmMoveBatch = async () => {
+    const selectedOrders = moveModal.orders.filter(o => o.selected);
+    if (selectedOrders.length === 0) {
+      alert("Please select at least one order to move.");
       return;
     }
 
-    const mpsOrderId = parseInt(splitModal.orderId);
+    const moves: any[] = [];
+    for (const o of selectedOrders) {
+       const qtyNum = parseFloat(o.moveQty);
+       if (isNaN(qtyNum) || qtyNum <= 0 || qtyNum > o.qty) {
+         alert(`Invalid quantity for SO ${o.soNumber}`);
+         return;
+       }
+       
+       let remainingToMove = qtyNum;
+       for(const idStr of (o.ids || [o.id])) {
+           if(remainingToMove <= 0) break;
+           
+           const mpsOrderId = parseInt(idStr);
+           const originalOrder = currentPlan.orders.find((x: any) => x.id === mpsOrderId);
+           if(originalOrder) {
+               const origQty = Number(originalOrder.quantityKg || originalOrder.qty);
+               if(remainingToMove >= origQty) {
+                   moves.push({ mpsOrderId, date: moveModal.targetDate });
+                   remainingToMove -= origQty;
+               } else {
+                   moves.push({ mpsOrderId, date: moveModal.targetDate, splitQty: remainingToMove });
+                   remainingToMove = 0;
+               }
+           }
+       }
+    }
 
-    setSplitModal({ ...splitModal, isOpen: false });
+    setMoveModal({ ...moveModal, isOpen: false });
     setLoading(true);
+    setLoadingStartTime(Date.now());
+    setLoadingPhase({ mode: 'loading', step: 1, message: 'Saving batched moves...' });
 
     try {
-      await fetch(`${API}/api/mps/update-date`, {
+      await fetch(`${API}/api/mps/update-date-batch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           planId: currentPlan.id,
-          mpsOrderId,
-          date: splitModal.targetDate,
-          splitQty: qtyNum
+          moves
         })
       });
-      // reload data after saving
-      initData();
+      setLoadingPhase({ mode: 'loading', step: 2, message: 'Reloading plan details...' });
+      const planRes = await fetch(`${API}/api/mps/plans/${currentPlan.id}`);
+      if (planRes.ok) {
+        const json = await planRes.json();
+        if (json.success) {
+          setCurrentPlan(json.data);
+        }
+      }
+      setLoadingPhase({ mode: 'loading', step: 4, message: 'Complete!' });
+      setTimeout(() => setLoading(false), 300);
     } catch (err) {
-      console.error("Failed to update date", err);
+      console.error("Failed to update dates", err);
+      // Fallback in case of total failure
       initData();
     }
   };
@@ -914,7 +1087,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
     const getCodesByProcess = (categoryName: string, processName: string) => {
       const catNodes = yieldTree.filter((n: any) => n.type === 'CATEGORY' && n.name === categoryName);
       const procNodes = yieldTree.filter((n: any) => n.type === 'PROCESS' && n.name === processName && catNodes.some((c: any) => c.id === n.parentId));
-      
+
       const nodeIds: string[] = [];
       const collect = (parentId: string) => {
         const children = yieldTree.filter((n: any) => n.parentId === parentId);
@@ -923,7 +1096,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
           collect(child.id);
         }
       };
-      
+
       procNodes.forEach((p: any) => {
         nodeIds.push(p.id);
         collect(p.id);
@@ -955,7 +1128,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
     let foodmateWorkers = 0;
     let fixedTrimmingWorkers = 0;
     let xrayMachinesCount = 0;
-    
+
     let toridasLinesNeeded = 0;
     let foodmateLinesNeeded = 0;
     let trimmingLinesNeeded = 0;
@@ -999,10 +1172,10 @@ const isMainProductSpec = (itemCode: string): boolean => {
             const yieldPct = spec?.productYield ? Number(spec.productYield) : 0.5;
             const speed = spec?.productSpeed ? Number(spec.productSpeed) : 45;
             const pcs = avgPieceWeight > 0 && yieldPct > 0 ? o.qty / (avgPieceWeight * yieldPct) : 0;
-            
+
             if (isDrum) requiredP2DrumPcs += pcs;
             else requiredP2ThighPcs += pcs;
-            
+
             separationWorkers += o.qty / speed;
           }
         }
@@ -1026,18 +1199,18 @@ const isMainProductSpec = (itemCode: string): boolean => {
         const conf = machineConfigs.find(c => c.machineKey === key);
         if (!conf) return defaults;
         return {
-            speed: Number(conf.capacityPcsPerHour),
-            yield: Number(conf.yieldPercentage),
-            lines: Number(conf.defaultLines),
-            machinesPerLine: Number(conf.machinesPerLine),
-            workers: Number(conf.workersPerUnit)
+          speed: Number(conf.capacityPcsPerHour),
+          yield: Number(conf.yieldPercentage),
+          lines: Number(conf.defaultLines),
+          machinesPerLine: Number(conf.machinesPerLine),
+          workers: Number(conf.workersPerUnit)
         };
       };
 
       const toridasConf = getMachineConfig('toridas', { speed: 1500, yield: 0.75, lines: 3, machinesPerLine: 4, workers: 5 });
       const foodmateConf = getMachineConfig('foodmate', { speed: 6000, yield: 0.70, lines: 1, machinesPerLine: 1, workers: 5 });
       const trimConf = getMachineConfig('trimming_belt', { speed: 600, yield: 1.0, lines: 3, machinesPerLine: 1, workers: 7 });
-      const xrayConf = getMachineConfig('xray', { speed: 18700, yield: 1.0, lines: 3, machinesPerLine: 1, workers: 5 });
+      const xrayConf = getMachineConfig('xray', { speed: 6000, yield: 1.0, lines: 3, machinesPerLine: 1, workers: 5 });
 
       // Populate outer-scoped machine config vars for UI
       mcToridasMachinesPerLine = toridasConf.machinesPerLine;
@@ -1080,21 +1253,21 @@ const isMainProductSpec = (itemCode: string): boolean => {
         toridasLinesNeeded = Math.ceil(toridasInputPcsPerShift / capacityPerToridasLine);
         toridasWorkers = toridasLinesNeeded * toridasConf.workers * shiftsNeeded;
       }
-      
+
       if (foodmateInputPcsPerShift > 0) {
         const capacityPerFoodmateLine = foodmateConf.machinesPerLine * foodmateConf.speed * 9.58;
         foodmateLinesNeeded = Math.ceil(foodmateInputPcsPerShift / capacityPerFoodmateLine);
         foodmateWorkers = foodmateLinesNeeded * foodmateConf.workers * shiftsNeeded;
       }
-      
+
       deboneWorkers = toridasWorkers + foodmateWorkers;
-      
+
       const trimmingWorkHoursPerShift = totalPcsProcessedPerShift / trimConf.speed;
       trimmingWorkersBase = Math.ceil(trimmingWorkHoursPerShift / 9.58) * shiftsNeeded;
-      
+
       trimmingLinesNeeded = Math.min(trimConf.lines, toridasLinesNeeded + foodmateLinesNeeded);
       fixedTrimmingWorkers = trimmingLinesNeeded * trimConf.workers * shiftsNeeded;
-      
+
       requiredCuttingWorkers = p1CuttingStaff + separationCuttingStaff + trimmingWorkersBase;
       const totalTrimmingWorkers = trimmingWorkersBase + fixedTrimmingWorkers;
 
@@ -1119,7 +1292,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
     if (dailySummary && dailySummary.blTrackerJson) {
       try {
         blTracker = JSON.parse(dailySummary.blTrackerJson);
-      } catch(e) {}
+      } catch (e) { }
     }
 
     const selectedSupply = currentPlan.supplyBreakdown?.find((s: any) => formatDBDate(s.productionDate) === date) || {};
@@ -1128,7 +1301,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
     const extDaily = externalRmSupplies.find(s => String(s.receivedDate).startsWith(date));
     let extSizes: Record<string, number> = {};
     if (extDaily && extDaily.sizeBreakdownJson) {
-      try { extSizes = JSON.parse(extDaily.sizeBreakdownJson); } catch (e) {}
+      try { extSizes = JSON.parse(extDaily.sizeBreakdownJson); } catch (e) { }
     }
     const getExternalSizeKg = (groupSize: string) => extSizes[groupSize] || 0;
 
@@ -1142,28 +1315,31 @@ const isMainProductSpec = (itemCode: string): boolean => {
 
     let estimatedNetOutput = sizeNames.reduce((sum: number, name: string) => sum + getInternalSizeKg(name) + getExternalSizeKg(name), 0);
 
+    const sizeBreakdown: Record<string, number> = {};
+    sizeNames.forEach(name => {
+      const sizeKg = getInternalSizeKg(name) + getExternalSizeKg(name);
+      sizeBreakdown[name] = sizeKg;
+    });
+
     if (partId === 'bl') {
-      let process3Node: any = null;
-      if (yieldTree && yieldTree.length > 0) {
-        const bilNode = yieldTree.find((n: any) => n.name === 'BIL L/C');
-        if (bilNode && bilNode.children) {
-          process3Node = bilNode.children.find((c: any) => c.name && c.name.toLowerCase().includes('process: 3'));
-        }
-      }
-      let blYield = 0.75;
-      if (process3Node && process3Node.children) {
-        const blNode = process3Node.children.find((c: any) => c.name.toLowerCase().includes('bl แผ่น') || c.yieldPercentage > 0.5);
-        if (blNode) blYield = Number(blNode.yieldPercentage || 0.75);
-      }
-      estimatedNetOutput = estimatedNetOutput * blYield;
+      const tConf = machineConfigs.find((c: any) => c.machineKey === 'toridas');
+      let blYield = tConf && Number(tConf.yieldPercentage) > 0 ? Number(tConf.yieldPercentage) : 0.75;
+
+      const defectFactor = 0.75; // Added defect factor as requested
+      // Update the size breakdown with BL yield
+      Object.keys(sizeBreakdown).forEach(k => {
+        sizeBreakdown[k] = sizeBreakdown[k] * blYield * defectFactor;
+      });
+      estimatedNetOutput = estimatedNetOutput * blYield * defectFactor;
     }
 
     return {
       intake: dailySummary ? Number(dailySummary.intakeBirds) : 0,
       intakeKg: dailySummary ? Number(dailySummary.rmFlAvailKg) : 0,
       rmFlAvailable: estimatedNetOutput,
+      sizeBreakdown,
       totalOrderQty: totalOrderQty,
-      manpower: dailyOrders.length > 0 ? totalManpowerPlan : 0,
+      manpower: (partId === 'bil' || partId === 'bl') ? totalManpowerPlan : (dailyOrders.length > 0 ? totalManpowerPlan : 0),
       blTracker,
       manpowerBreakdown: {
         plannedStationWorkers: partId === 'bil' ? deboneWorkers + fixedTrimmingWorkers + xrayWorkers : plannedStationWorkers,
@@ -1223,7 +1399,8 @@ const isMainProductSpec = (itemCode: string): boolean => {
   const icutTotalHours = currentPlan?.orders?.reduce((sum: number, o: any) => {
     const spec = specs[o.itemCode];
     if (spec && spec.icutSpeed && Number(spec.icutSpeed) > 0) {
-      return sum + (Number(o.quantityKg || 0) / Number(spec.icutSpeed));
+      const yieldPct = spec.productYield && Number(spec.productYield) > 0 ? Number(spec.productYield) : 1;
+      return sum + ((Number(o.quantityKg || 0) / yieldPct) / Number(spec.icutSpeed));
     }
     return sum;
   }, 0) || 0;
@@ -1282,12 +1459,12 @@ const isMainProductSpec = (itemCode: string): boolean => {
       // if (!specs[line.erpOrderItemCode]) return false;
       // Filter by allowed item codes from Master Yield Tree
       if (allowedItemCodes.length > 0 && !allowedItemCodes.includes(line.erpOrderItemCode)) return false;
-      
+
       const shipDate = new Date(line.erpOrderShipDate);
-      
-      const monthDiff = (shipDate.getFullYear() - currentMonth.getFullYear()) * 12 + 
-                        (shipDate.getMonth() - currentMonth.getMonth());
-                        
+
+      const monthDiff = (shipDate.getFullYear() - currentMonth.getFullYear()) * 12 +
+        (shipDate.getMonth() - currentMonth.getMonth());
+
       // Show orders shipping in the current month, plus up to 2 months ahead 
       // (to account for maxProductLead times like 30-60 days)
       const isUpcomingShipment = monthDiff >= 0 && monthDiff <= 2;
@@ -1642,12 +1819,12 @@ const isMainProductSpec = (itemCode: string): boolean => {
                 <StatCard label="Total Monthly Intake" value={totalIntakeBirds.toLocaleString()} unit="Birds" icon={Activity} color="blue" />
                 <StatCard label="Total Orders" value={totalOrdersQty.toLocaleString()} unit="kg" icon={Package} color="orange" />
                 <StatCard label="Estimated Total Yield" value={Math.round(totalRmFlAvail).toLocaleString()} unit="kg" icon={Scale} color="green" />
-                <StatCard 
-                  label={partId === 'bl' ? "I-CUT Utilization (Total)" : "Avg. Daily Manpower"} 
-                  value={icutDisplayValue} 
-                  unit={icutDisplayUnit} 
-                  icon={partId === 'bl' ? Zap : Users} 
-                  color={partId === 'bl' ? (icutUtilization > 100 ? "red" : "purple") : "purple"} 
+                <StatCard
+                  label={partId === 'bl' ? "I-CUT Utilization (Total)" : "Avg. Daily Manpower"}
+                  value={icutDisplayValue}
+                  unit={icutDisplayUnit}
+                  icon={partId === 'bl' ? Zap : Users}
+                  color={partId === 'bl' ? (icutUtilization > 100 ? "red" : "purple") : "purple"}
                 />
               </div>
 
@@ -1769,7 +1946,13 @@ const isMainProductSpec = (itemCode: string): boolean => {
                       <div
                         key={date}
                         onDragOver={handleDragOver}
-                        onDrop={(e) => handleDrop(e, date)}
+                        onDrop={(e) => {
+                          if(currentPlan?.lockedDays?.includes(date)) {
+                             alert('This day is locked.');
+                             return;
+                          }
+                          handleDrop(e, date);
+                        }}
                         className={`min-h-[180px] border-r border-b border-gray-100 p-2 flex flex-col gap-2 transition-colors
                       ${isToday ? 'bg-orange-50/30' : (Math.round(metrics.rmFlAvailable - metrics.totalOrderQty) !== 0 ? 'bg-red-100' : 'bg-white hover:bg-gray-50')}
                       ${metrics.supplyBreakdown ? 'cursor-pointer hover:shadow-md' : ''}
@@ -1791,6 +1974,15 @@ const isMainProductSpec = (itemCode: string): boolean => {
                             <span className={`w-7 h-7 flex items-center justify-center rounded-full text-sm font-bold ${isToday ? 'bg-orange-500 text-white shadow-md' : 'text-gray-700'}`}>
                               {dayNum}
                             </span>
+                            {currentPlan?.status === 'DRAFT' && (
+                               <button 
+                                  onClick={(e) => handleToggleLock(date, e)} 
+                                  title={currentPlan?.lockedDays?.includes(date) ? 'Unlock this day' : 'Lock this day'}
+                                  className={`ml-1 p-1 rounded-full transition-colors ${currentPlan?.lockedDays?.includes(date) ? 'bg-red-100 text-red-600 shadow-sm' : 'text-gray-300 hover:bg-gray-100 hover:text-gray-600'}`}
+                               >
+                                  {currentPlan?.lockedDays?.includes(date) ? <Lock size={12}/> : <Unlock size={12}/>}
+                               </button>
+                            )}
                             {hasWeekly && (
                               <span className="bg-blue-100 text-blue-700 text-[9px] px-1.5 py-0.5 rounded uppercase font-bold tracking-wider shadow-sm border border-blue-200">
                                 Week
@@ -1817,9 +2009,28 @@ const isMainProductSpec = (itemCode: string): boolean => {
                         {/* Metrics Summary (if activity exists) */}
                         {(metrics.intake > 0 || metrics.rmFlAvailable > 0 || metrics.totalOrderQty > 0) && (
                           <div className="bg-slate-50/50 backdrop-blur-sm rounded-xl p-2.5 text-[10px] space-y-2 border border-slate-100 shadow-sm">
-                            <div className="flex justify-between items-center">
-                              <span className="text-slate-500 font-bold uppercase tracking-tighter">RM Available</span>
-                              <span className="font-black text-slate-800 bg-white px-1.5 py-0.5 rounded shadow-sm">
+                            <div className="flex justify-between items-center group relative">
+                              <span className="text-slate-500 font-bold uppercase tracking-tighter cursor-help border-b border-dashed border-slate-300">RM Available</span>
+
+                              {/* Tooltip for Size Breakdown */}
+                              {metrics.sizeBreakdown && Object.keys(metrics.sizeBreakdown).length > 0 && (
+                                <div className="absolute left-0 bottom-full mb-2 hidden group-hover:block w-48 bg-gray-900 text-white text-[10px] rounded-lg shadow-xl z-50 p-2 pointer-events-none">
+                                  <div className="font-bold text-gray-300 mb-1 border-b border-gray-700 pb-1">Size Breakdown</div>
+                                  <div className="max-h-32 overflow-y-auto pr-1">
+                                    {Object.entries(metrics.sizeBreakdown)
+                                      .filter(([_, val]) => Number(val) > 0)
+                                      .sort(([k1], [k2]) => k1.localeCompare(k2))
+                                      .map(([sizeName, val]) => (
+                                        <div key={sizeName} className="flex justify-between items-center py-0.5">
+                                          <span className="text-gray-400">{sizeName}:</span>
+                                          <span className="font-mono">{Math.round(Number(val)).toLocaleString()}</span>
+                                        </div>
+                                      ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              <span className="font-black text-slate-800 bg-white px-1.5 py-0.5 rounded shadow-sm relative z-10">
                                 {Math.round(metrics.rmFlAvailable).toLocaleString()} <span className="opacity-50">kg</span>
                               </span>
                             </div>
@@ -1874,24 +2085,27 @@ const isMainProductSpec = (itemCode: string): boolean => {
                           {Object.values(metrics.dailyOrders.reduce((acc: any, order: any) => {
                             const key = `${order.itemCode}_${order.type}`;
                             if (!acc[key]) {
-                              acc[key] = { ...order, qty: 0, soNumbers: new Set(), shipDates: new Set() };
+                              acc[key] = { ...order, qty: 0, soNumbers: new Set(), shipDates: new Set(), groupedOrders: [] };
                             }
                             acc[key].qty += Number(order.qty || 0);
                             acc[key].soNumbers.add(order.soNumber);
                             acc[key].shipDates.add(order.shipDate);
+                            acc[key].groupedOrders.push(order);
                             return acc;
-                          }, {})).map((order: any, idx: number) => {
+                          }, {}))
+                            .filter((order: any) => Math.round(order.qty) > 0)
+                            .map((order: any, idx: number) => {
                             const soList = Array.from(order.soNumbers);
                             const shipList = Array.from(order.shipDates);
                             const soDisplay = soList.length > 1 ? 'Multiple' : soList[0];
                             const shipDisplay = shipList.length > 1 ? 'Multiple' : shipList[0];
                             const isHighlighted = highlightedSoNumber && soList.includes(highlightedSoNumber);
-                            
+
                             return (
                               <motion.div
                                 layoutId={`grouped_${order.itemCode}_${order.type}_${dayNum}`}
                                 draggable={currentPlan?.status !== 'APPROVED'}
-                                onDragStart={currentPlan?.status !== 'APPROVED' ? (e: any) => handleDragStart(e, order.id) : undefined}
+                                onDragStart={currentPlan?.status !== 'APPROVED' && !currentPlan?.lockedDays?.includes(date) ? (e: any) => handleDragStart(e, { sourceDate: date, itemCode: order.itemCode, itemDesc: order.itemDesc, orders: order.groupedOrders }) : undefined}
                                 onClick={() => setHighlightedSoNumber(isHighlighted ? null : (soList[0] as string))}
                                 key={`grouped_${order.itemCode}_${order.type}_${idx}`}
                                 className={`p-2 rounded-lg text-xs border shadow-sm transition-all
@@ -2341,7 +2555,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
           <motion.div
             initial={{ opacity: 0, scale: 0.95, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            className="bg-white rounded-2xl shadow-xl w-full max-w-7xl flex flex-col max-h-[90vh] border border-gray-200"
+            className="bg-white rounded-2xl shadow-xl w-[95vw] max-w-[1920px] flex flex-col max-h-[95vh] border border-gray-200"
           >
             {/* Modal Header */}
             <div className="flex justify-between items-center px-6 py-4 border-b border-gray-100 bg-gray-50/50 rounded-t-2xl">
@@ -2417,105 +2631,87 @@ const isMainProductSpec = (itemCode: string): boolean => {
                     const icutKg = Number(trk.icutUsedKg || 0);
                     const icutHours = Number(trk.icutUsedHours || 0);
                     const manualKg = Number(trk.manualUsedKg || 0);
-                    const icutCap = Number(trk.icutCapacityHours || 37); 
+                    const icutCap = Number(trk.icutCapacityHours || 37);
                     const icutUtil = icutCap > 0 ? (icutHours / icutCap) * 100 : 0;
                     const manualCapPerPerson = 200; // e.g. 200kg per person per day
                     const manualPeople = Math.ceil(manualKg / manualCapPerPerson);
-                    
+
                     const blBlockProduced = Number(trk.blBlockProduced || 0);
                     const blBlockUsed = Number(trk.blBlockUsed || 0);
                     const blBlockRemaining = blBlockProduced - blBlockUsed;
-                    
+
                     return (
-                    <div className="space-y-6">
-                      <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-6 space-y-4">
-                        <h4 className="text-sm font-bold text-indigo-800 flex items-center gap-2">
-                          <Zap size={16} className="text-indigo-500" />
-                          I-CUT Capacity & Manual Trimming
-                        </h4>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                          <div className="bg-white/80 p-3 rounded-xl border border-indigo-200 shadow-sm flex flex-col justify-center">
-                            <p className="text-[10px] font-bold text-indigo-500 uppercase mb-1">I-CUT PROCESS (เนื้อเข้าเครื่อง)</p>
-                            <div className="flex items-baseline gap-1">
-                              <span className="text-2xl font-black text-indigo-900">{Math.round(icutKg).toLocaleString()}</span>
-                              <span className="text-[9px] font-bold text-indigo-400">kg</span>
-                            </div>
-                          </div>
-                          <div className="bg-white/80 p-3 rounded-xl border border-indigo-200 shadow-sm flex flex-col justify-center">
-                            <p className="text-[10px] font-bold text-indigo-500 uppercase mb-1">I-CUT HOURS (เวลาเดินเครื่อง)</p>
-                            <div className="flex items-baseline gap-1">
-                              <span className="text-2xl font-black text-indigo-900">{icutHours.toFixed(1)}</span>
-                              <span className="text-[9px] font-bold text-indigo-400">/ {icutCap.toFixed(1)} ชม.</span>
-                            </div>
-                          </div>
-                          <div className="bg-white/80 p-3 rounded-xl border border-amber-200 shadow-sm flex flex-col justify-center">
-                            <p className="text-[10px] font-bold text-amber-500 uppercase mb-1">MANUAL TRIM (ให้คนตัด)</p>
-                            <div className="flex items-baseline gap-1">
-                              <span className="text-2xl font-black text-amber-900">{Math.round(manualKg).toLocaleString()}</span>
-                              <span className="text-[9px] font-bold text-amber-400">kg ({manualPeople} คน)</span>
-                            </div>
-                          </div>
-                          <div className="bg-emerald-50 p-3 rounded-xl border border-emerald-200 shadow-sm flex flex-col justify-center">
-                            <p className="text-[10px] font-bold text-emerald-600 uppercase mb-1">I-CUT UTILIZATION (ประสิทธิภาพ)</p>
-                            <div className="flex items-baseline gap-1">
-                              <span className="text-2xl font-black text-emerald-900">{icutUtil.toFixed(1)}</span>
-                              <span className="text-[9px] font-bold text-emerald-500">%</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* BL BLOCK Tracking */}
-                      <div className="bg-orange-50 border border-orange-100 rounded-2xl p-6 space-y-4">
-                        <h4 className="text-sm font-bold text-orange-800 flex items-center gap-2">
-                          <Package size={16} className="text-orange-500" />
-                          BL BLOCK Tracking (Co-Product)
-                        </h4>
-                        <div className="grid grid-cols-3 gap-4">
-                          <div className="bg-white/80 p-3 rounded-xl border border-emerald-200 shadow-sm">
-                            <p className="text-[10px] font-bold text-emerald-600 uppercase mb-1">ผลิตได้ (Produced)</p>
-                            <div className="flex items-baseline gap-1">
-                              <span className="text-2xl font-black text-emerald-900">+{Math.round(blBlockProduced).toLocaleString()}</span>
-                              <span className="text-[9px] font-bold text-emerald-500">kg</span>
-                            </div>
-                          </div>
-                          <div className="bg-white/80 p-3 rounded-xl border border-red-200 shadow-sm">
-                            <p className="text-[10px] font-bold text-red-500 uppercase mb-1">ดึงไปใช้ (Used)</p>
-                            <div className="flex items-baseline gap-1">
-                              <span className="text-2xl font-black text-red-900">-{Math.round(blBlockUsed).toLocaleString()}</span>
-                              <span className="text-[9px] font-bold text-red-400">kg</span>
-                            </div>
-                          </div>
-                          <div className="bg-white/80 p-3 rounded-xl border border-orange-200 shadow-sm">
-                            <p className="text-[10px] font-bold text-orange-600 uppercase mb-1">คงเหลือ (Remaining)</p>
-                            <div className="flex items-baseline gap-1">
-                              <span className="text-2xl font-black text-orange-900">{Math.round(blBlockRemaining).toLocaleString()}</span>
-                              <span className="text-[9px] font-bold text-orange-500">kg</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Belt Gate Size Breakdown */}
-                      {trk.beltGateSizes && Object.keys(trk.beltGateSizes).length > 0 && (
-                        <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 space-y-4">
-                          <h4 className="text-sm font-bold text-slate-800 flex items-center gap-2">
-                            <Layers size={16} className="text-slate-500" />
-                            Belt Gate Sizes (RM BL)
+                      <div className="space-y-6">
+                        <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-6 space-y-4">
+                          <h4 className="text-sm font-bold text-indigo-800 flex items-center gap-2">
+                            <Zap size={16} className="text-indigo-500" />
+                            I-CUT Capacity & Manual Trimming
                           </h4>
-                          <div className="flex flex-wrap gap-2">
-                            {Object.entries(trk.beltGateSizes)
-                              .filter(([sz, qty]) => Number(qty) > 0 && !sz.startsWith('BL_BLOCK'))
-                              .map(([sz, qty]) => (
-                              <div key={sz} className="bg-white border border-slate-200 px-3 py-1.5 rounded-lg shadow-sm flex items-center gap-2">
-                                <span className="text-[11px] font-bold text-slate-600">{sz}</span>
-                                <span className="text-sm font-black text-slate-900">{Math.round(Number(qty)).toLocaleString()} <span className="text-[10px] font-medium text-slate-400">kg</span></span>
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                            <div className="bg-white/80 p-3 rounded-xl border border-indigo-200 shadow-sm flex flex-col justify-center">
+                              <p className="text-[10px] font-bold text-indigo-500 uppercase mb-1">I-CUT PROCESS (เนื้อเข้าเครื่อง)</p>
+                              <div className="flex items-baseline gap-1">
+                                <span className="text-2xl font-black text-indigo-900">{Math.round(icutKg).toLocaleString()}</span>
+                                <span className="text-[9px] font-bold text-indigo-400">kg</span>
                               </div>
-                            ))}
+                            </div>
+                            <div className="bg-white/80 p-3 rounded-xl border border-indigo-200 shadow-sm flex flex-col justify-center">
+                              <p className="text-[10px] font-bold text-indigo-500 uppercase mb-1">I-CUT HOURS (เวลาเดินเครื่อง)</p>
+                              <div className="flex items-baseline gap-1">
+                                <span className="text-2xl font-black text-indigo-900">{icutHours.toFixed(1)}</span>
+                                <span className="text-[9px] font-bold text-indigo-400">/ {icutCap.toFixed(1)} ชม.</span>
+                              </div>
+                            </div>
+                            <div className="bg-white/80 p-3 rounded-xl border border-amber-200 shadow-sm flex flex-col justify-center">
+                              <p className="text-[10px] font-bold text-amber-500 uppercase mb-1">MANUAL TRIM (ให้คนตัด)</p>
+                              <div className="flex items-baseline gap-1">
+                                <span className="text-2xl font-black text-amber-900">{Math.round(manualKg).toLocaleString()}</span>
+                                <span className="text-[9px] font-bold text-amber-400">kg ({manualPeople} คน)</span>
+                              </div>
+                            </div>
+                            <div className="bg-emerald-50 p-3 rounded-xl border border-emerald-200 shadow-sm flex flex-col justify-center">
+                              <p className="text-[10px] font-bold text-emerald-600 uppercase mb-1">I-CUT UTILIZATION (ประสิทธิภาพ)</p>
+                              <div className="flex items-baseline gap-1">
+                                <span className="text-2xl font-black text-emerald-900">{icutUtil.toFixed(1)}</span>
+                                <span className="text-[9px] font-bold text-emerald-500">%</span>
+                              </div>
+                            </div>
                           </div>
                         </div>
-                      )}
-                    </div>
+
+                        {/* BL BLOCK Tracking */}
+                        <div className="bg-orange-50 border border-orange-100 rounded-2xl p-6 space-y-4">
+                          <h4 className="text-sm font-bold text-orange-800 flex items-center gap-2">
+                            <Package size={16} className="text-orange-500" />
+                            BL BLOCK Tracking (Co-Product)
+                          </h4>
+                          <div className="grid grid-cols-3 gap-4">
+                            <div className="bg-white/80 p-3 rounded-xl border border-emerald-200 shadow-sm">
+                              <p className="text-[10px] font-bold text-emerald-600 uppercase mb-1">ผลิตได้ (Produced)</p>
+                              <div className="flex items-baseline gap-1">
+                                <span className="text-2xl font-black text-emerald-900">+{Math.round(blBlockProduced).toLocaleString()}</span>
+                                <span className="text-[9px] font-bold text-emerald-500">kg</span>
+                              </div>
+                            </div>
+                            <div className="bg-white/80 p-3 rounded-xl border border-red-200 shadow-sm">
+                              <p className="text-[10px] font-bold text-red-500 uppercase mb-1">ดึงไปใช้ (Used)</p>
+                              <div className="flex items-baseline gap-1">
+                                <span className="text-2xl font-black text-red-900">-{Math.round(blBlockUsed).toLocaleString()}</span>
+                                <span className="text-[9px] font-bold text-red-400">kg</span>
+                              </div>
+                            </div>
+                            <div className="bg-white/80 p-3 rounded-xl border border-orange-200 shadow-sm">
+                              <p className="text-[10px] font-bold text-orange-600 uppercase mb-1">คงเหลือ (Remaining)</p>
+                              <div className="flex items-baseline gap-1">
+                                <span className="text-2xl font-black text-orange-900">{Math.round(blBlockRemaining).toLocaleString()}</span>
+                                <span className="text-[9px] font-bold text-orange-500">kg</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Belt Gate Size Breakdown (Removed as requested) */}
+                      </div>
                     );
                   })() : selectedManpower && (
                     <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-6 space-y-4">
@@ -2527,188 +2723,188 @@ const isMainProductSpec = (itemCode: string): boolean => {
                         const metrics = calculateDailyMetrics(selectedDate);
                         const mb = metrics.manpowerBreakdown;
                         return (
-                        <div className="flex flex-col gap-4">
-                          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                            {/* Process 1 */}
-                            <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-4 rounded-2xl border border-blue-200 shadow-sm flex flex-col justify-between relative overflow-hidden group hover:shadow-md transition-all">
-                              <div className="flex items-center justify-between mb-2 z-10">
-                                <p className="text-xs font-bold text-blue-700 uppercase tracking-wider">Process 1: BIL</p>
-                                <Package size={16} className="text-blue-400" />
+                          <div className="flex flex-col gap-4">
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                              {/* Process 1 */}
+                              <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-4 rounded-2xl border border-blue-200 shadow-sm flex flex-col justify-between relative overflow-hidden group hover:shadow-md transition-all">
+                                <div className="flex items-center justify-between mb-2 z-10">
+                                  <p className="text-xs font-bold text-blue-700 uppercase tracking-wider">Process 1: BIL</p>
+                                  <Package size={16} className="text-blue-400" />
+                                </div>
+                                <div className="flex items-baseline gap-1 z-10">
+                                  <span className="text-3xl font-black text-blue-900">{mb.p1CuttingStaff || 0}</span>
+                                  <span className="text-xs font-bold text-blue-500">Pax</span>
+                                </div>
+                                <div className="absolute -bottom-4 -right-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                                  <Package size={80} />
+                                </div>
                               </div>
-                              <div className="flex items-baseline gap-1 z-10">
-                                <span className="text-3xl font-black text-blue-900">{mb.p1CuttingStaff || 0}</span>
-                                <span className="text-xs font-bold text-blue-500">Pax</span>
+
+                              {/* Process 2 */}
+                              <div className="bg-gradient-to-br from-purple-50 to-purple-100 p-4 rounded-2xl border border-purple-200 shadow-sm flex flex-col justify-between relative overflow-hidden group hover:shadow-md transition-all">
+                                <div className="flex items-center justify-between mb-2 z-10">
+                                  <p className="text-xs font-bold text-purple-700 uppercase tracking-wider">Process 2: สะโพก + น่อง</p>
+                                  <Move size={16} className="text-purple-400" />
+                                </div>
+                                <div className="flex items-baseline gap-1 z-10">
+                                  <span className="text-3xl font-black text-purple-900">{mb.separationCuttingStaff || 0}</span>
+                                  <span className="text-xs font-bold text-purple-500">Pax</span>
+                                </div>
+                                <div className="absolute -bottom-4 -right-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                                  <Move size={80} />
+                                </div>
                               </div>
-                              <div className="absolute -bottom-4 -right-4 opacity-10 group-hover:opacity-20 transition-opacity">
-                                <Package size={80} />
+
+                              {/* Process 3 */}
+                              <div className="bg-gradient-to-br from-pink-50 to-pink-100 p-4 rounded-2xl border border-pink-200 shadow-sm flex flex-col justify-between relative overflow-hidden group hover:shadow-md transition-all">
+                                <div className="flex items-center justify-between mb-2 z-10">
+                                  <p className="text-xs font-bold text-pink-700 uppercase tracking-wider">Process 3: BL</p>
+                                  <Activity size={16} className="text-pink-400" />
+                                </div>
+                                <div className="flex items-baseline gap-1 z-10">
+                                  <span className="text-3xl font-black text-pink-900">{((mb.deboneWorkers || 0) + (mb.trimmingBeltWorkers || 0) + (mb.xrayWorkers || 0)) || 0}</span>
+                                  <span className="text-xs font-bold text-pink-500">Pax</span>
+                                </div>
+                                <div className="absolute -bottom-4 -right-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                                  <Activity size={80} />
+                                </div>
                               </div>
-                            </div>
-                            
-                            {/* Process 2 */}
-                            <div className="bg-gradient-to-br from-purple-50 to-purple-100 p-4 rounded-2xl border border-purple-200 shadow-sm flex flex-col justify-between relative overflow-hidden group hover:shadow-md transition-all">
-                              <div className="flex items-center justify-between mb-2 z-10">
-                                <p className="text-xs font-bold text-purple-700 uppercase tracking-wider">Process 2: สะโพก + น่อง</p>
-                                <Move size={16} className="text-purple-400" />
-                              </div>
-                              <div className="flex items-baseline gap-1 z-10">
-                                <span className="text-3xl font-black text-purple-900">{mb.separationCuttingStaff || 0}</span>
-                                <span className="text-xs font-bold text-purple-500">Pax</span>
-                              </div>
-                              <div className="absolute -bottom-4 -right-4 opacity-10 group-hover:opacity-20 transition-opacity">
-                                <Move size={80} />
+
+                              {/* Total Manpower */}
+                              <div className="bg-gradient-to-br from-indigo-500 to-indigo-600 p-4 rounded-2xl border border-indigo-700 shadow-md flex flex-col justify-between relative overflow-hidden group hover:shadow-lg transition-all text-white">
+                                <div className="flex items-center justify-between mb-2 z-10">
+                                  <p className="text-xs font-bold text-indigo-100 uppercase tracking-wider">Total Manpower</p>
+                                  <Users size={16} className="text-indigo-200" />
+                                </div>
+                                <div className="flex items-baseline gap-1 z-10">
+                                  <span className="text-3xl font-black text-white">{(mb.p1CuttingStaff || 0) + (mb.separationCuttingStaff || 0) + ((mb.deboneWorkers || 0) + (mb.trimmingBeltWorkers || 0) + (mb.xrayWorkers || 0))}</span>
+                                  <span className="text-xs font-bold text-indigo-200">Pax</span>
+                                </div>
+                                <div className="absolute -bottom-4 -right-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                                  <Users size={80} />
+                                </div>
                               </div>
                             </div>
 
-                            {/* Process 3 */}
-                            <div className="bg-gradient-to-br from-pink-50 to-pink-100 p-4 rounded-2xl border border-pink-200 shadow-sm flex flex-col justify-between relative overflow-hidden group hover:shadow-md transition-all">
-                              <div className="flex items-center justify-between mb-2 z-10">
-                                <p className="text-xs font-bold text-pink-700 uppercase tracking-wider">Process 3: BL</p>
-                                <Activity size={16} className="text-pink-400" />
+                            {/* Process 3 Breakdown */}
+                            <div className="mt-2 bg-white rounded-2xl border border-pink-100 overflow-hidden shadow-sm">
+                              <div className="bg-pink-50/50 px-4 py-2 border-b border-pink-100 flex items-center justify-between">
+                                <p className="text-xs font-bold text-pink-700 flex items-center gap-2">
+                                  <Activity size={14} />
+                                  Process 3 (BL) Breakdown
+                                </p>
                               </div>
-                              <div className="flex items-baseline gap-1 z-10">
-                                <span className="text-3xl font-black text-pink-900">{((mb.deboneWorkers || 0) + (mb.trimmingBeltWorkers || 0) + (mb.xrayWorkers || 0)) || 0}</span>
-                                <span className="text-xs font-bold text-pink-500">Pax</span>
-                              </div>
-                              <div className="absolute -bottom-4 -right-4 opacity-10 group-hover:opacity-20 transition-opacity">
-                                <Activity size={80} />
+                              {/* Machine Summary Table */}
+                              <div className="overflow-x-auto">
+                                <table className="w-full text-[11px] border-collapse">
+                                  <thead>
+                                    <tr className="bg-pink-50/80">
+                                      <th className="text-left px-3 py-2 font-bold text-pink-800 border-b border-pink-200">เครื่องจักร</th>
+                                      <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">จำนวนไลน์</th>
+                                      <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">เครื่อง/ไลน์</th>
+                                      <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">เครื่องทั้งหมด</th>
+                                      <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">จำนวนกะ</th>
+                                      <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">Yield</th>
+                                      <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">คน/ไลน์/กะ</th>
+                                      <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">รวมคน</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {/* Toridas */}
+                                    <tr className="hover:bg-pink-50/40 transition-colors">
+                                      <td className="px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-bold text-gray-800">🔧 Toridas</span>
+                                        <span className="text-[9px] text-gray-400 ml-1">(Debone)</span>
+                                      </td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 font-semibold text-gray-700">{mb.toridasLinesNeeded || 0}</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{mb.toridasMachinesPerLine || 4}</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-bold text-pink-700 bg-pink-50 px-2 py-0.5 rounded">{mb.toridasTotalMachines || 0}</span>
+                                      </td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded whitespace-nowrap">{mb.shiftsNeeded || 0} กะ</span>
+                                      </td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{((mb.toridasYield || 0.75) * 100).toFixed(0)}%</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{mb.toridasWorkersPerUnit || 5}</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-extrabold text-gray-900">{mb.toridasWorkers || 0}</span>
+                                      </td>
+                                    </tr>
+                                    {/* Foodmate */}
+                                    <tr className="hover:bg-pink-50/40 transition-colors">
+                                      <td className="px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-bold text-gray-800">🔧 Foodmate</span>
+                                        <span className="text-[9px] text-gray-400 ml-1">(Debone)</span>
+                                      </td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 font-semibold text-gray-700">{mb.foodmateLinesNeeded || 0}</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{mb.foodmateMachinesPerLine || 1}</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-bold text-pink-700 bg-pink-50 px-2 py-0.5 rounded">{mb.foodmateTotalMachines || 0}</span>
+                                      </td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded whitespace-nowrap">{mb.shiftsNeeded || 0} กะ</span>
+                                      </td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{((mb.foodmateYield || 0.70) * 100).toFixed(0)}%</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{mb.foodmateWorkersPerUnit || 5}</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-extrabold text-gray-900">{mb.foodmateWorkers || 0}</span>
+                                      </td>
+                                    </tr>
+                                    {/* Trimming Belt */}
+                                    <tr className="hover:bg-pink-50/40 transition-colors">
+                                      <td className="px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-bold text-gray-800">✂️ Trimming Belt</span>
+                                        <span className="text-[9px] text-gray-400 ml-1">(ตัดแต่ง+ประจำจุด)</span>
+                                      </td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 font-semibold text-gray-700">{mb.trimmingLinesNeeded || 0}</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">1</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-bold text-pink-700 bg-pink-50 px-2 py-0.5 rounded">{mb.trimmingLinesNeeded || 0}</span>
+                                      </td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded whitespace-nowrap">{mb.shiftsNeeded || 0} กะ</span>
+                                      </td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">-</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{mb.trimWorkersPerLine || 7}</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-extrabold text-gray-900">{mb.trimmingBeltWorkers || 0}</span>
+                                      </td>
+                                    </tr>
+                                    {/* X-Ray */}
+                                    <tr className="hover:bg-pink-50/40 transition-colors">
+                                      <td className="px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-bold text-gray-800">📡 X-Ray</span>
+                                      </td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 font-semibold text-gray-700">-</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">-</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-bold text-pink-700 bg-pink-50 px-2 py-0.5 rounded">{mb.xrayMachinesCount || 0}</span>
+                                      </td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded whitespace-nowrap">{mb.shiftsNeeded || 0} กะ</span>
+                                      </td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">-</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{mb.xrayWorkersPerUnit || 5}</td>
+                                      <td className="text-center px-3 py-2.5 border-b border-pink-100">
+                                        <span className="font-extrabold text-gray-900">{mb.xrayWorkers || 0}</span>
+                                      </td>
+                                    </tr>
+                                  </tbody>
+                                  <tfoot>
+                                    <tr className="bg-pink-50/60">
+                                      <td colSpan={7} className="px-3 py-2.5 font-bold text-pink-800 text-right border-t border-pink-200">รวมคนทั้งหมด (Process 3)</td>
+                                      <td className="text-center px-3 py-2.5 border-t border-pink-200">
+                                        <span className="font-extrabold text-pink-700 text-sm">{(mb.deboneWorkers || 0) + (mb.trimmingBeltWorkers || 0) + (mb.xrayWorkers || 0)}</span>
+                                      </td>
+                                    </tr>
+                                  </tfoot>
+                                </table>
                               </div>
                             </div>
-
-                            {/* Total Manpower */}
-                            <div className="bg-gradient-to-br from-indigo-500 to-indigo-600 p-4 rounded-2xl border border-indigo-700 shadow-md flex flex-col justify-between relative overflow-hidden group hover:shadow-lg transition-all text-white">
-                              <div className="flex items-center justify-between mb-2 z-10">
-                                <p className="text-xs font-bold text-indigo-100 uppercase tracking-wider">Total Manpower</p>
-                                <Users size={16} className="text-indigo-200" />
-                              </div>
-                              <div className="flex items-baseline gap-1 z-10">
-                                <span className="text-3xl font-black text-white">{(mb.p1CuttingStaff || 0) + (mb.separationCuttingStaff || 0) + ((mb.deboneWorkers || 0) + (mb.trimmingBeltWorkers || 0) + (mb.xrayWorkers || 0))}</span>
-                                <span className="text-xs font-bold text-indigo-200">Pax</span>
-                              </div>
-                              <div className="absolute -bottom-4 -right-4 opacity-10 group-hover:opacity-20 transition-opacity">
-                                <Users size={80} />
-                              </div>
-                            </div>
-                          </div>
-                          
-                          {/* Process 3 Breakdown */}
-                          <div className="mt-2 bg-white rounded-2xl border border-pink-100 overflow-hidden shadow-sm">
-                            <div className="bg-pink-50/50 px-4 py-2 border-b border-pink-100 flex items-center justify-between">
-                               <p className="text-xs font-bold text-pink-700 flex items-center gap-2">
-                                 <Activity size={14}/>
-                                 Process 3 (BL) Breakdown
-                               </p>
-                            </div>
-                            {/* Machine Summary Table */}
-                            <div className="overflow-x-auto">
-                              <table className="w-full text-[11px] border-collapse">
-                                <thead>
-                                  <tr className="bg-pink-50/80">
-                                    <th className="text-left px-3 py-2 font-bold text-pink-800 border-b border-pink-200">เครื่องจักร</th>
-                                    <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">จำนวนไลน์</th>
-                                    <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">เครื่อง/ไลน์</th>
-                                    <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">เครื่องทั้งหมด</th>
-                                    <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">จำนวนกะ</th>
-                                    <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">Yield</th>
-                                    <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">คน/ไลน์/กะ</th>
-                                    <th className="text-center px-3 py-2 font-bold text-pink-800 border-b border-pink-200">รวมคน</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {/* Toridas */}
-                                  <tr className="hover:bg-pink-50/40 transition-colors">
-                                    <td className="px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-bold text-gray-800">🔧 Toridas</span>
-                                      <span className="text-[9px] text-gray-400 ml-1">(Debone)</span>
-                                    </td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 font-semibold text-gray-700">{mb.toridasLinesNeeded || 0}</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{mb.toridasMachinesPerLine || 4}</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-bold text-pink-700 bg-pink-50 px-2 py-0.5 rounded">{mb.toridasTotalMachines || 0}</span>
-                                    </td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded whitespace-nowrap">{mb.shiftsNeeded || 0} กะ</span>
-                                    </td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{((mb.toridasYield || 0.75) * 100).toFixed(0)}%</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{mb.toridasWorkersPerUnit || 5}</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-extrabold text-gray-900">{mb.toridasWorkers || 0}</span>
-                                    </td>
-                                  </tr>
-                                  {/* Foodmate */}
-                                  <tr className="hover:bg-pink-50/40 transition-colors">
-                                    <td className="px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-bold text-gray-800">🔧 Foodmate</span>
-                                      <span className="text-[9px] text-gray-400 ml-1">(Debone)</span>
-                                    </td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 font-semibold text-gray-700">{mb.foodmateLinesNeeded || 0}</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{mb.foodmateMachinesPerLine || 1}</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-bold text-pink-700 bg-pink-50 px-2 py-0.5 rounded">{mb.foodmateTotalMachines || 0}</span>
-                                    </td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded whitespace-nowrap">{mb.shiftsNeeded || 0} กะ</span>
-                                    </td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{((mb.foodmateYield || 0.70) * 100).toFixed(0)}%</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{mb.foodmateWorkersPerUnit || 5}</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-extrabold text-gray-900">{mb.foodmateWorkers || 0}</span>
-                                    </td>
-                                  </tr>
-                                  {/* Trimming Belt */}
-                                  <tr className="hover:bg-pink-50/40 transition-colors">
-                                    <td className="px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-bold text-gray-800">✂️ Trimming Belt</span>
-                                      <span className="text-[9px] text-gray-400 ml-1">(ตัดแต่ง+ประจำจุด)</span>
-                                    </td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 font-semibold text-gray-700">{mb.trimmingLinesNeeded || 0}</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">1</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-bold text-pink-700 bg-pink-50 px-2 py-0.5 rounded">{mb.trimmingLinesNeeded || 0}</span>
-                                    </td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded whitespace-nowrap">{mb.shiftsNeeded || 0} กะ</span>
-                                    </td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">-</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{mb.trimWorkersPerLine || 7}</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-extrabold text-gray-900">{mb.trimmingBeltWorkers || 0}</span>
-                                    </td>
-                                  </tr>
-                                  {/* X-Ray */}
-                                  <tr className="hover:bg-pink-50/40 transition-colors">
-                                    <td className="px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-bold text-gray-800">📡 X-Ray</span>
-                                    </td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 font-semibold text-gray-700">-</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">-</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-bold text-pink-700 bg-pink-50 px-2 py-0.5 rounded">{mb.xrayMachinesCount || 0}</span>
-                                    </td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded whitespace-nowrap">{mb.shiftsNeeded || 0} กะ</span>
-                                    </td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">-</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100 text-gray-600">{mb.xrayWorkersPerUnit || 5}</td>
-                                    <td className="text-center px-3 py-2.5 border-b border-pink-100">
-                                      <span className="font-extrabold text-gray-900">{mb.xrayWorkers || 0}</span>
-                                    </td>
-                                  </tr>
-                                </tbody>
-                                <tfoot>
-                                  <tr className="bg-pink-50/60">
-                                    <td colSpan={7} className="px-3 py-2.5 font-bold text-pink-800 text-right border-t border-pink-200">รวมคนทั้งหมด (Process 3)</td>
-                                    <td className="text-center px-3 py-2.5 border-t border-pink-200">
-                                      <span className="font-extrabold text-pink-700 text-sm">{(mb.deboneWorkers || 0) + (mb.trimmingBeltWorkers || 0) + (mb.xrayWorkers || 0)}</span>
-                                    </td>
-                                  </tr>
-                                </tfoot>
-                              </table>
+                            <div className="text-[10px] text-indigo-400/80 italic font-medium px-2">
+                              * Total Planned Station Workers: {mb.plannedStationWorkers} | Cutting: {mb.plannedCuttingWorkers}
                             </div>
                           </div>
-                          <div className="text-[10px] text-indigo-400/80 italic font-medium px-2">
-                            * Total Planned Station Workers: {mb.plannedStationWorkers} | Cutting: {mb.plannedCuttingWorkers}
-                          </div>
-                        </div>
                         );
                       })() : (
                         <>
@@ -2782,24 +2978,9 @@ const isMainProductSpec = (itemCode: string): boolean => {
 
                           const rmFlTotal = slaughtered * 0.04;
 
-                          // Parse byproducts JSON to find Yield-Tree based Grade B
-                          let byProducts: Record<string, { name: string; qty: number; processName?: string; type?: string }> = {};
-                          if (selectedSupply.byProducts) {
-                            try {
-                              byProducts = JSON.parse(selectedSupply.byProducts);
-                            } catch (e) {
-                              console.error('Error parsing byProducts', e);
-                            }
-                          }
-
-                          const yieldTreeGradeB = Object.values(byProducts)
-                            .filter((bp: any) => bp.name && (bp.name === 'สันในเกรด B' || bp.name.includes('เกรด B') || bp.name.toLowerCase().includes('grade b')))
-                            .reduce((sum: number, bp: any) => sum + Number(bp.qty || 0), 0);
-
-                          // If yield tree Grade B is available, use it. Otherwise fall back to formula-based 9.3%
-                          const rmFlGradeB = yieldTreeGradeB > 0 ? yieldTreeGradeB : rmFlTotal * 0.093;
+                          // Calculate Grade B directly from Total Capacity (9.3%) to ensure it matches RM FL Total
+                          const rmFlGradeB = rmFlTotal * 0.093;
                           const rmFlNet = rmFlTotal - rmFlGradeB;
-                          const isYieldTree = yieldTreeGradeB > 0;
 
                           return (
                             <>
@@ -2811,14 +2992,14 @@ const isMainProductSpec = (itemCode: string): boolean => {
                                 </div>
                                 <p className="text-[9px] text-orange-400 mt-1 italic">Slaughtered * 4%</p>
                               </div>
-                              <div className={`bg-white/80 p-4 rounded-xl border border-orange-200 ${isYieldTree ? 'border-dashed border-2' : ''}`}>
+                              <div className="bg-white/80 p-4 rounded-xl border border-orange-200">
                                 <p className="text-[10px] font-bold text-orange-600 uppercase mb-1">{pc.rmPrefix} Grade B</p>
                                 <div className="flex items-baseline gap-1">
                                   <span className="text-2xl font-black text-orange-900">{Math.round(rmFlGradeB).toLocaleString()}</span>
                                   <span className="text-xs font-bold text-orange-500">kg</span>
                                 </div>
-                                <p className={`text-[9px] mt-1 italic ${isYieldTree ? 'text-emerald-600 font-bold' : 'text-orange-400'}`}>
-                                  {isYieldTree ? '✓ Calculated via Yield Tree' : 'Total * 9.3% (Fallback)'}
+                                <p className="text-[9px] mt-1 italic text-orange-400">
+                                  Total * 9.3%
                                 </p>
                               </div>
                               <div className="bg-orange-500 p-4 rounded-xl shadow-md">
@@ -2848,8 +3029,8 @@ const isMainProductSpec = (itemCode: string): boolean => {
                     const extRatio = totalBlQty > 0 ? extTotal / totalBlQty : 0;
                     const blSizesFrontend: Record<string, { internalVal: number, externalVal: number, totalVal: number }> = {};
                     const process3ByProducts: Record<string, Record<string, { internalVal: number, externalVal: number, totalVal: number }>> = {};
-                    
-                    if (Object.keys(blSizesDb).length === 0 && selectedSupply.sizes) {
+
+                    if (selectedSupply.sizes) {
                       const mainOrders = selectedDailyOrders.filter((o: any) => getProductType(o.itemCode) === 'main' && Math.round(Number(o.qty)) > 0);
                       const demandKgByBilSize: Record<string, number> = {};
                       mainOrders.forEach((o: any) => {
@@ -2872,7 +3053,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
                           try {
                             const extBreakdown = JSON.parse(ext.sizeBreakdownJson);
                             Object.entries(extBreakdown).forEach(([k, v]) => { allBilSizesSet.add(k); extSizesObj[k] = (extSizesObj[k] || 0) + Number(v); });
-                          } catch (e) {}
+                          } catch (e) { }
                         }
                       });
                       const initialRems: { bilSz: string, rem: number, totalQty: number, iR: number, eR: number }[] = [];
@@ -2906,12 +3087,12 @@ const isMainProductSpec = (itemCode: string): boolean => {
                         }
                       }
 
-                      let blYield = 0.75;
+                      const tConf = machineConfigs.find((c: any) => c.machineKey === 'toridas');
+                      let blYield = tConf && Number(tConf.yieldPercentage) > 0 ? Number(tConf.yieldPercentage) : 0.75;
                       let bpYields: { id: string, name: string, pct: number }[] = [];
                       if (process3Node && process3Node.children) {
                         const blNode = process3Node.children.find((c: any) => c.name.toLowerCase().includes('bl แผ่น') || c.yieldPercentage > 0.5);
-                        if (blNode) blYield = Number(blNode.yieldPercentage || 0.75);
-                        
+
                         process3Node.children.forEach((c: any) => {
                           if (c !== blNode && Number(c.yieldPercentage || 0) > 0) {
                             bpYields.push({ id: c.id, name: c.name, pct: Number(c.yieldPercentage) });
@@ -2922,7 +3103,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
 
                       initialRems.forEach(({ bilSz, rem, totalQty, iR, eR }) => {
                         let finalRem = rem;
-                        
+
                         // If no rem is available, fallback to totalQty if that's what was intended
                         if (sumInitialRem === 0 && sumTotalQty > 0) {
                           finalRem = totalQty * (blRmTotal / sumTotalQty);
@@ -2930,7 +3111,8 @@ const isMainProductSpec = (itemCode: string): boolean => {
 
                         if (finalRem > 0) {
                           const blSz = blColLabelsMap[bilSz] || `BL ${bilSz}`;
-                          const blQty = finalRem * blYield;
+                          const defectFactor = 0.75; // Added defect factor as requested
+                          const blQty = finalRem * blYield * defectFactor;
                           blSizesFrontend[blSz] = {
                             internalVal: (blSizesFrontend[blSz]?.internalVal || 0) + (blQty * iR),
                             externalVal: (blSizesFrontend[blSz]?.externalVal || 0) + (blQty * eR),
@@ -2948,18 +3130,92 @@ const isMainProductSpec = (itemCode: string): boolean => {
                           });
                         }
                       });
-                    } else {
-                      for (const [sz, qtyRaw] of Object.entries(blSizesDb)) {
+                    }
+
+                    // Merge any additional sizes from backend (e.g., TOTAL_BL_BLOCK)
+                    for (const [sz, qtyRaw] of Object.entries(blSizesDb)) {
+                      if (!sz.toUpperCase().startsWith('BL ') || !blSizesFrontend[sz]) {
                         const qty = Number(qtyRaw);
                         if (qty > 0) blSizesFrontend[sz] = { internalVal: qty * intRatio, externalVal: qty * extRatio, totalVal: qty };
                       }
                     }
-                    
+
                     // Attach to the current daily scope so it can be accessed
                     (selectedSupply as any)._blSizesFrontend = blSizesFrontend;
                     (selectedSupply as any)._process3ByProducts = process3ByProducts;
                     return null;
                   })()}
+
+                  {/* Section 4.4: BLK Size Breakdown (Mapped from Matrix) */}
+                  {false && partId === 'bl' && (
+                    <div className="bg-purple-50 border border-purple-100 rounded-2xl p-6 space-y-4">
+                      {(() => {
+                        const blkSizesDb = selectedSupply.sizes?.filter((s: any) => s.partName === 'BLK') || [];
+                        const hasAnyBlk = blkSizesDb.length > 0;
+                        
+                        let grandTotalBlk = 0;
+                        if (hasAnyBlk) {
+                          blkSizesDb.forEach((data: any) => {
+                            grandTotalBlk += Number(data.quantityKg || 0);
+                          });
+                        }
+
+                        return (
+                          <>
+                            <div className="mb-4">
+                              <h4 className="text-sm font-bold text-purple-800 flex items-center gap-2">
+                                <Layers size={16} className="text-purple-500" />
+                                RM BLK Breakdown (Mapped from Matrix)
+                              </h4>
+                            </div>
+
+                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                              {!hasAnyBlk ? (
+                                <div className="text-sm text-purple-600 italic col-span-full">No BLK sizes generated yet.</div>
+                              ) : (
+                                blkSizesDb
+                                  .filter((data: any) => Math.round(Number(data.quantityKg || 0)) > 0)
+                                  .sort((a: any, b: any) => {
+                                    const numA = parseInt(a.groupSize.match(/\d+/)?.[0] || '0', 10);
+                                    const numB = parseInt(b.groupSize.match(/\d+/)?.[0] || '0', 10);
+                                    if (numA === numB) return a.groupSize.localeCompare(b.groupSize);
+                                    return numA - numB;
+                                  })
+                                  .map((data: any, idx: number) => {
+                                    return (
+                                      <div key={idx} className="bg-white border border-purple-100 p-3 rounded-xl shadow-sm hover:border-purple-300 transition-all flex flex-col justify-between">
+                                        <div className="flex justify-between items-start mb-2">
+                                          <p className="text-[10px] font-bold text-purple-800 uppercase bg-purple-100 px-1.5 py-0.5 rounded">{data.groupSize}</p>
+                                        </div>
+                                        <div className="space-y-1 mt-1">
+                                          <div className="pt-1 mt-1 border-t border-purple-50 flex justify-between items-center text-[11px] font-black">
+                                            <span className="text-purple-600">TOTAL</span>
+                                            <span className="text-purple-700">{Math.round(Number(data.quantityKg || 0)).toLocaleString()} kg</span>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    );
+                                  })
+                              )}
+                            </div>
+
+                            {hasAnyBlk && (
+                              <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div className="bg-gradient-to-r from-purple-500 to-indigo-500 rounded-xl p-4 flex justify-between items-center text-white shadow-md">
+                                  <p className="text-sm font-bold uppercase tracking-wider">Grand Total RM BLK</p>
+                                  <div className="flex items-baseline gap-1 text-right">
+                                    <p className="text-3xl font-black">{Math.round(grandTotalBlk).toLocaleString()}</p>
+                                    <p className="text-xs font-bold text-purple-100 uppercase">kg</p>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  )}
+
 
                   {/* Section 4: RM Size Breakdown (Internal vs External) */}
                   <div className="space-y-4">
@@ -2980,7 +3236,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
                         const extDaily = externalRmSupplies.find(s => String(s.receivedDate).startsWith(selectedDate));
                         let extSizes: Record<string, number> = {};
                         if (extDaily && extDaily.sizeBreakdownJson) {
-                          try { extSizes = JSON.parse(extDaily.sizeBreakdownJson); } catch (e) {}
+                          try { extSizes = JSON.parse(extDaily.sizeBreakdownJson); } catch (e) { }
                         }
                         const getExternalSizeKg = (groupSize: string) => {
                           if (partId === 'bl') return blSizesFrontend[groupSize]?.externalVal || 0;
@@ -3056,45 +3312,88 @@ const isMainProductSpec = (itemCode: string): boolean => {
                   {/* Section 4.5: BL Size Breakdown */}
                   {partId === 'bil' && (
                     <div className="bg-pink-50 border border-pink-100 rounded-2xl p-6 space-y-4">
-                      <h4 className="text-sm font-bold text-pink-800 flex items-center gap-2">
-                        <Layers size={16} className="text-pink-500" />
-                        BL Size Breakdown (Internal vs External)
-                      </h4>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-                        {(() => {
-                            const blSizesFrontend = (selectedSupply as any)._blSizesFrontend || {};
-                            const hasAnyBl = Object.keys(blSizesFrontend).length > 0;
+                      {(() => {
+                        const blSizesFrontend = (selectedSupply as any)._blSizesFrontend || {};
+                        const hasAnyBl = Object.keys(blSizesFrontend).length > 0;
 
-                          if (!hasAnyBl) {
-                            return <div className="text-sm text-pink-600 italic col-span-full">No BL sizes generated yet.</div>;
-                          }
+                        let grandTotalInternal = 0;
+                        let grandTotalExternal = 0;
+                        let grandTotal = 0;
 
-                          return Object.entries(blSizesFrontend).filter(([_, data]) => Math.round((data as any).totalVal) > 0).map(([sz, data], idx) => {
-                            const dData = data as any;
-                            return (
-                              <div key={idx} className="bg-white border border-pink-100 p-3 rounded-xl shadow-sm hover:border-pink-300 transition-all flex flex-col justify-between">
-                                <div className="flex justify-between items-start mb-2">
-                                  <p className="text-[10px] font-bold text-pink-800 uppercase bg-pink-100 px-1.5 py-0.5 rounded">{sz}</p>
+                        if (hasAnyBl) {
+                          Object.values(blSizesFrontend).forEach((data: any) => {
+                            grandTotalInternal += Number(data.internalVal || 0);
+                            grandTotalExternal += Number(data.externalVal || 0);
+                            grandTotal += Number(data.totalVal || 0);
+                          });
+                        }
+
+                        return (
+                          <>
+                            <div className="mb-4">
+                              <h4 className="text-sm font-bold text-pink-800 flex items-center gap-2">
+                                <Layers size={16} className="text-pink-500" />
+                                BL Size Breakdown (Internal vs External)
+                              </h4>
+                            </div>
+
+                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                              {!hasAnyBl ? (
+                                <div className="text-sm text-pink-600 italic col-span-full">No BL sizes generated yet.</div>
+                              ) : (
+                                Object.entries(blSizesFrontend)
+                                  .filter(([_, data]) => Math.round((data as any).totalVal) > 0)
+                                  .map(([sz, data], idx) => {
+                                    const dData = data as any;
+                                    return (
+                                      <div key={idx} className="bg-white border border-pink-100 p-3 rounded-xl shadow-sm hover:border-pink-300 transition-all flex flex-col justify-between">
+                                        <div className="flex justify-between items-start mb-2">
+                                          <p className="text-[10px] font-bold text-pink-800 uppercase bg-pink-100 px-1.5 py-0.5 rounded">{sz}</p>
+                                        </div>
+                                        <div className="space-y-1 mt-1">
+                                          <div className="flex justify-between items-center text-[10px]">
+                                            <span className="text-gray-500 font-medium">Internal:</span>
+                                            <span className="font-bold text-gray-700">{Math.round(dData.internalVal).toLocaleString()} kg</span>
+                                          </div>
+                                          <div className="flex justify-between items-center text-[10px]">
+                                            <span className="text-blue-500 font-medium">External:</span>
+                                            <span className="font-bold text-blue-700">{Math.round(dData.externalVal).toLocaleString()} kg</span>
+                                          </div>
+                                          <div className="pt-1 mt-1 border-t border-pink-50 flex justify-between items-center text-[11px] font-black">
+                                            <span className="text-pink-600">TOTAL</span>
+                                            <span className="text-pink-700">{Math.round(dData.totalVal).toLocaleString()} kg</span>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    );
+                                  })
+                              )}
+                            </div>
+
+                            {hasAnyBl && (
+                              <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div className="bg-white border border-pink-200 rounded-xl p-4 flex justify-between items-center shadow-sm">
+                                  <div>
+                                    <p className="text-xs font-bold text-gray-500 uppercase">Internal</p>
+                                    <p className="text-xl font-black text-gray-800">{Math.round(grandTotalInternal).toLocaleString()} kg</p>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className="text-xs font-bold text-blue-500 uppercase">External</p>
+                                    <p className="text-xl font-black text-blue-700">{Math.round(grandTotalExternal).toLocaleString()} kg</p>
+                                  </div>
                                 </div>
-                                <div className="space-y-1 mt-1">
-                                  <div className="flex justify-between items-center text-[10px]">
-                                    <span className="text-gray-500 font-medium">Internal:</span>
-                                    <span className="font-bold text-gray-700">{Math.round(dData.internalVal).toLocaleString()} kg</span>
-                                  </div>
-                                  <div className="flex justify-between items-center text-[10px]">
-                                    <span className="text-blue-500 font-medium">External:</span>
-                                    <span className="font-bold text-blue-700">{Math.round(dData.externalVal).toLocaleString()} kg</span>
-                                  </div>
-                                  <div className="pt-1 mt-1 border-t border-pink-50 flex justify-between items-center text-[11px] font-black">
-                                    <span className="text-pink-600">TOTAL</span>
-                                    <span className="text-pink-700">{Math.round(dData.totalVal).toLocaleString()} kg</span>
+                                <div className="bg-gradient-to-r from-pink-500 to-rose-500 rounded-xl p-4 flex justify-between items-center text-white shadow-md">
+                                  <p className="text-sm font-bold uppercase tracking-wider">Grand Total</p>
+                                  <div className="flex items-baseline gap-1 text-right">
+                                    <p className="text-3xl font-black">{Math.round(grandTotal).toLocaleString()}</p>
+                                    <p className="text-xs font-bold text-pink-100 uppercase">kg</p>
                                   </div>
                                 </div>
                               </div>
-                            );
-                          });
-                        })()}
-                      </div>
+                            )}
+                          </>
+                        );
+                      })()}
                     </div>
                   )}
 
@@ -3119,14 +3418,14 @@ const isMainProductSpec = (itemCode: string): boolean => {
                                 const bpData = process3ByProducts[bpName] as any;
                                 const totalVal = Math.round(bpData.totalVal);
                                 if (totalVal <= 0) return null;
-                                
-                                
+
+
 
 
                                 return (
                                   <div key={bpidx} className="bg-white border border-amber-200 p-4 rounded-xl shadow-sm hover:shadow-md hover:border-amber-400 transition-all flex flex-col justify-between h-full">
                                     <h5 className="text-sm font-black text-amber-900 uppercase mb-3 pb-2 border-b border-amber-100">{bpName}</h5>
-                                    
+
                                     <div className="space-y-1.5 mb-4">
                                       <div className="flex flex-wrap justify-between items-center text-[10px] gap-x-2 gap-y-0.5">
                                         <span className="text-gray-500">Internal</span>
@@ -3165,7 +3464,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
                         const extDaily = externalRmSupplies.find(s => String(s.receivedDate).startsWith(selectedDate));
                         let extSizes: Record<string, number> = {};
                         if (extDaily && extDaily.sizeBreakdownJson) {
-                          try { extSizes = JSON.parse(extDaily.sizeBreakdownJson); } catch (e) {}
+                          try { extSizes = JSON.parse(extDaily.sizeBreakdownJson); } catch (e) { }
                         }
                         const getExternalSizeKg = (groupSize: string) => {
                           if (partId === 'bl') return (selectedSupply as any)._blSizesFrontend?.[groupSize]?.externalVal || 0;
@@ -3173,7 +3472,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
                         };
 
                         const isBil = currentPlan?.partType === 'bil' || currentPlan?.partType === 'bl' || currentPlan?.partType === 'leg';
-                        
+
                         const allBilSizes = new Set(partId === 'bl' ? Object.keys((selectedSupply as any)._blSizesFrontend || {}) : (selectedSupply.sizes || []).map((s: any) => s.groupSize as string));
                         if (partId !== 'bl') {
                           Object.keys(extSizes).forEach(k => allBilSizes.add(k));
@@ -3273,17 +3572,19 @@ const isMainProductSpec = (itemCode: string): boolean => {
                           return n.includes('เกรด b') || n.includes('เกรดบี') || n.includes('grade b');
                         };
 
-                        const aggregated: Record<string, { name: string; qty: number; sizes?: Record<string, number> }> = {};
+                        const aggregated: Record<string, { name: string; qty: number; internalQty?: number; externalQty?: number; sizes?: Record<string, number> }> = {};
                         Object.values(byProducts).forEach((bp: any) => {
                           if (!bp.name) return; // skip BL format entries without name
                           if (isGradeB(bp.name)) return; // Exclude Grade B
 
                           const name = bp.name.trim();
                           if (!aggregated[name]) {
-                            aggregated[name] = { name, qty: 0, sizes: {} };
+                            aggregated[name] = { name, qty: 0, internalQty: 0, externalQty: 0, sizes: {} };
                           }
                           aggregated[name].qty += Number(bp.qty || 0);
-                          
+                          aggregated[name].internalQty! += Number(bp.internalQty || 0);
+                          aggregated[name].externalQty! += Number(bp.externalQty || 0);
+
                           if (bp.sizes) {
                             const totalSizes = Object.values(bp.sizes).reduce((sum: number, val: any) => sum + Number(val), 0) as number;
                             Object.entries(bp.sizes).forEach(([sz, szQty]) => {
@@ -3304,7 +3605,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
                         if (items.length === 0) {
                           return <div className="text-sm text-amber-600 italic col-span-full">No By Products generated for the selected orders.</div>;
                         }
-                        
+
                         const isBlMain = (name: string) => {
                           const n = name.toUpperCase();
                           return n.includes('BL') && !n.includes('BL-TH') && !n.includes('BL-DR') && !n.includes('สะโพก') && !n.includes('น่อง');
@@ -3314,8 +3615,9 @@ const isMainProductSpec = (itemCode: string): boolean => {
 
                         otherItems.forEach((bp, index) => {
                           const roundedQty = Math.max(0, Math.round(bp.qty));
+                          const totalGenerated = Math.max(0, Math.round((bp.internalQty || 0) + (bp.externalQty || 0)));
                           const hasSizes = bp.sizes && Object.keys(bp.sizes).length > 0;
-                          
+
                           if (hasSizes) {
                             elements.push(
                               <div key={`other-major-${index}`} className="bg-gradient-to-br from-indigo-50 to-purple-50 col-span-full p-4 rounded-xl border border-indigo-200 shadow-sm">
@@ -3324,12 +3626,20 @@ const isMainProductSpec = (itemCode: string): boolean => {
                                     <p className="text-xs font-bold text-indigo-800 uppercase tracking-wider">{bp.name}</p>
                                     <p className="text-[10px] text-indigo-500">Output By-Product</p>
                                   </div>
-                                  <div className="flex items-baseline gap-1 text-right">
-                                    <span className="text-3xl font-black text-indigo-900">{roundedQty.toLocaleString()}</span>
-                                    <span className="text-xs font-bold text-indigo-500">kg</span>
+                                  <div className="flex flex-col items-end gap-1 text-right">
+                                    <div className="flex items-baseline gap-1">
+                                      <span className="text-xs text-gray-500">Total Produced:</span>
+                                      <span className="text-sm font-bold text-gray-700">{totalGenerated.toLocaleString()}</span>
+                                      <span className="text-[10px] font-bold text-gray-400">kg</span>
+                                    </div>
+                                    <div className="flex items-baseline gap-1">
+                                      <span className="text-xs text-indigo-400">Remaining:</span>
+                                      <span className="text-3xl font-black text-indigo-900">{roundedQty.toLocaleString()}</span>
+                                      <span className="text-xs font-bold text-indigo-500">kg</span>
+                                    </div>
                                   </div>
                                 </div>
-                                
+
                                 <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 gap-3">
                                   {Object.entries(bp.sizes!).filter(([_, qty]) => Number(qty) > 1).map(([sz, qty], i) => (
                                     <div key={i} className="bg-white p-2.5 rounded-lg border border-indigo-100 shadow-sm hover:border-indigo-300 transition-colors">
@@ -3345,7 +3655,9 @@ const isMainProductSpec = (itemCode: string): boolean => {
                               <div key={`other-minor-${index}`} className="bg-white p-4 rounded-xl border border-amber-200 shadow-sm hover:shadow hover:border-amber-400 transition-all flex flex-col justify-between">
                                 <div>
                                   <p className="text-[10px] font-bold text-gray-400 uppercase mb-1 tracking-wider">{bp.name}</p>
+                                  <p className="text-[10px] text-gray-400 mb-2">Total Produced: <span className="font-bold text-gray-600">{totalGenerated.toLocaleString()} kg</span></p>
                                   <div className="flex items-baseline gap-1">
+                                    <span className="text-xs text-amber-600/80 mr-1">Remain:</span>
                                     <span className="text-2xl font-black text-amber-900">{roundedQty.toLocaleString()}</span>
                                     <span className="text-xs font-bold text-amber-500">kg</span>
                                   </div>
@@ -3364,9 +3676,110 @@ const isMainProductSpec = (itemCode: string): boolean => {
 
                 {/* ====== RIGHT: DEMAND PANEL ====== */}
                 <div className="space-y-4">
-                  <h4 className="text-sm font-black text-orange-700 uppercase tracking-wider flex items-center gap-2">
-                    <ShoppingCart size={16} /> Demand (Orders)
-                  </h4>
+                  <div className="flex justify-between items-center">
+                    <h4 className="text-sm font-black text-orange-700 uppercase tracking-wider flex items-center gap-2">
+                      <ShoppingCart size={16} /> Demand (Orders)
+                    </h4>
+                    <button 
+                      onClick={() => {
+                          if (!showManualPull) handleOpenManualPull();
+                          else setShowManualPull(false);
+                      }}
+                      className="px-3 py-1 bg-white border border-blue-200 text-blue-600 font-bold hover:bg-blue-50 hover:border-blue-300 rounded-lg transition-colors text-xs shadow-sm flex items-center gap-1"
+                    >
+                      {showManualPull ? 'Hide Orders' : '➕ Add Order'}
+                    </button>
+                  </div>
+                  
+                  {showManualPull && (
+                    <div className="bg-blue-50/30 border border-blue-100 rounded-2xl p-4 overflow-hidden flex flex-col max-h-[400px] mb-4">
+                       <div className="mb-3">
+                         <input 
+                           type="text"
+                           placeholder="Search SO Number or Item Code..."
+                           value={manualPullSearch}
+                           onChange={(e) => {
+                               setManualPullSearch(e.target.value);
+                               setManualPullPage(1);
+                           }}
+                           className="w-full border border-gray-300 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none shadow-sm"
+                         />
+                       </div>
+                       {(() => {
+                           const filtered = (unassignedList || []).filter(uo => (uo.soNumber || '').toLowerCase().includes(manualPullSearch.toLowerCase()) || (uo.itemCode || '').toLowerCase().includes(manualPullSearch.toLowerCase()));
+                           const totalPages = Math.ceil(filtered.length / 10);
+                           return filtered.length === 0 ? (
+                               <p className="text-center text-gray-500 py-8 text-sm">No orders found.</p>
+                           ) : (
+                               <>
+                               <div className="overflow-y-auto space-y-2 pr-2 custom-scrollbar mb-2">
+                                  {filtered.slice((manualPullPage - 1) * 10, manualPullPage * 10).map((uo, idx) => (
+                                     <div key={idx} className="bg-white border border-gray-200 rounded-xl p-3 flex items-center gap-4 hover:border-blue-300 transition-colors shadow-sm">
+                                       <div className="flex-1">
+                                          <div className="flex justify-between mb-1">
+                                             <span className="font-bold text-gray-800 text-sm">{uo.soNumber}</span>
+                                             <span className="text-xs font-bold text-orange-600 bg-orange-50 px-2 py-0.5 rounded">Ship: {new Date(uo.shipDate).toLocaleDateString()}</span>
+                                          </div>
+                                          <p className="text-xs text-gray-500 truncate">
+                                             <span className="font-bold text-gray-600 mr-2">{uo.itemCode}</span>
+                                             {uo.itemName || uo.itemDesc}
+                                          </p>
+                                       </div>
+                                       <div className="flex flex-col items-end gap-1">
+                                          <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Remaining</span>
+                                          <span className="font-black text-gray-700">{Math.round(uo.remainingQty).toLocaleString()} kg</span>
+                                       </div>
+                                       <div className="h-10 w-px bg-gray-200 mx-2"></div>
+                                       <div className="flex items-center gap-2">
+                                          <input 
+                                             type="number"
+                                             value={uo.pullQty}
+                                             onChange={(e) => {
+                                                const newList = [...unassignedList];
+                                                const originalIdx = unassignedList.findIndex(x => x === uo);
+                                                if (originalIdx >= 0) {
+                                                    newList[originalIdx].pullQty = e.target.value;
+                                                    setUnassignedList(newList);
+                                                }
+                                             }}
+                                             className="w-24 border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none"
+                                          />
+                                          <button
+                                             onClick={() => handlePullOrder(uo)}
+                                             className="px-4 py-1.5 bg-gradient-to-r from-blue-500 to-indigo-500 text-white font-bold rounded-lg shadow hover:shadow-md transition-all text-sm"
+                                          >
+                                             Pull
+                                          </button>
+                                       </div>
+                                     </div>
+                                  ))}
+                               </div>
+                               {totalPages > 1 && (
+                                   <div className="flex justify-center items-center gap-4 mt-3 mb-1">
+                                      <button
+                                         disabled={manualPullPage === 1}
+                                         onClick={() => setManualPullPage(prev => Math.max(1, prev - 1))}
+                                         className="px-4 py-1.5 text-xs font-bold rounded-xl border border-gray-300 transition-all bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm flex items-center gap-1"
+                                      >
+                                         ◀ Back
+                                      </button>
+                                      <span className="text-xs font-bold text-gray-500 bg-gray-100 px-3 py-1 rounded-lg">
+                                         Page {manualPullPage} of {totalPages}
+                                      </span>
+                                      <button
+                                         disabled={manualPullPage === totalPages}
+                                         onClick={() => setManualPullPage(prev => Math.min(totalPages, prev + 1))}
+                                         className="px-4 py-1.5 text-xs font-bold rounded-xl border border-gray-300 transition-all bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm flex items-center gap-1"
+                                      >
+                                         Next ▶
+                                      </button>
+                                   </div>
+                               )}
+                               </>
+                           );
+                       })()}
+                    </div>
+                  )}
 
                   {selectedDailyOrders.length === 0 ? (
                     <div className="bg-gray-50 border border-gray-200 rounded-xl p-8 text-center">
@@ -3512,20 +3925,21 @@ const isMainProductSpec = (itemCode: string): boolean => {
                                         {ords.map((ord: any, idx: number) => {
                                           const spec = specs[ord.itemCode];
                                           return (
-                                          <div key={idx} className="flex items-center gap-2 text-[11px] py-1 px-2 bg-white/80 rounded border border-gray-100">
-                                            <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${ord.type === 'chilled' ? 'bg-orange-100 text-orange-700' : 'bg-cyan-100 text-cyan-700'}`}>
-                                              {ord.type === 'chilled' ? 'C' : 'F'}
-                                            </span>
-                                            {Number(spec?.icutSpeed) > 0 && (
-                                              <span className="px-1 py-0.5 rounded text-[8px] font-bold bg-indigo-100 text-indigo-700 border border-indigo-200 uppercase tracking-tighter">
-                                                I-CUT
+                                            <div key={idx} className="flex items-center gap-2 text-[11px] py-1 px-2 bg-white/80 rounded border border-gray-100">
+                                              <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${ord.type === 'chilled' ? 'bg-orange-100 text-orange-700' : 'bg-cyan-100 text-cyan-700'}`}>
+                                                {ord.type === 'chilled' ? 'C' : 'F'}
                                               </span>
-                                            )}
-                                            <span className="font-bold text-gray-700">{ord.soNumber}</span>
-                                            <span className="text-gray-400 text-[10px]">{ord.itemCode}</span>
-                                            <span className="ml-auto font-bold text-gray-900">{Math.round(ord.qty).toLocaleString()} kg</span>
-                                          </div>
-                                        )})}
+                                              {Number(spec?.icutSpeed) > 0 && (
+                                                <span className="px-1 py-0.5 rounded text-[8px] font-bold bg-indigo-100 text-indigo-700 border border-indigo-200 uppercase tracking-tighter">
+                                                  I-CUT
+                                                </span>
+                                              )}
+                                              <span className="font-bold text-gray-700">{ord.soNumber}</span>
+                                              <span className="text-gray-400 text-[10px]">{ord.itemCode}</span>
+                                              <span className="ml-auto font-bold text-gray-900">{Math.round(ord.qty).toLocaleString()} kg</span>
+                                            </div>
+                                          )
+                                        })}
                                       </div>
                                     )}
                                   </div>
@@ -3550,8 +3964,8 @@ const isMainProductSpec = (itemCode: string): boolean => {
                                       <th className="text-left px-3 py-2 font-bold">Type</th>
                                       <th className="text-left px-3 py-2 font-bold">Size</th>
                                       <th className="text-right px-3 py-2 font-bold">Yield</th>
-                                      <th className="text-right px-3 py-2 font-bold">FG Qty</th>
-                                      <th className="text-right px-3 py-2 font-bold">RM Needed</th>
+                                      <th className="text-right px-3 py-2 font-bold text-gray-500">Order FG</th>
+                                      <th className="text-right px-3 py-2 font-bold text-gray-500">Order RM</th>
                                     </tr>
                                   </thead>
                                   <tbody>
@@ -3560,6 +3974,11 @@ const isMainProductSpec = (itemCode: string): boolean => {
                                       const size = spec?.productSize || 'unsize';
                                       const productYield = Number(spec?.productYield || 1.0);
                                       const rmNeeded = order.qty / productYield;
+
+                                      // Use actual order quantities instead of capped values since Matched/Prod columns are removed
+                                      const displayOrderQty = order.qty;
+                                      const displayRmNeeded = rmNeeded;
+
                                       return (
                                         <tr key={idx} className="border-t border-gray-100 hover:bg-orange-50/30">
                                           <td className="px-3 py-2">
@@ -3578,8 +3997,8 @@ const isMainProductSpec = (itemCode: string): boolean => {
                                           </td>
                                           <td className="px-3 py-2 font-bold text-gray-700">{size}</td>
                                           <td className="px-3 py-2 text-right font-medium text-blue-600">{(productYield * 100).toFixed(1)}%</td>
-                                          <td className="px-3 py-2 text-right font-bold text-gray-900">{Math.round(order.qty).toLocaleString()}</td>
-                                          <td className="px-3 py-2 text-right font-black text-orange-600">{Math.round(rmNeeded).toLocaleString()}</td>
+                                          <td className="px-3 py-2 text-right text-gray-700 font-bold">{Math.round(displayOrderQty).toLocaleString()}</td>
+                                          <td className="px-3 py-2 text-right text-gray-700 font-bold">{Math.round(displayRmNeeded).toLocaleString()}</td>
                                         </tr>
                                       );
                                     })}
@@ -3587,8 +4006,10 @@ const isMainProductSpec = (itemCode: string): boolean => {
                                   <tfoot>
                                     <tr className="bg-gray-900 text-white">
                                       <td colSpan={4} className="px-3 py-2 font-bold text-xs uppercase">Total Main Product</td>
-                                      <td className="px-3 py-2 text-right font-bold">{Math.round(mainOrders.reduce((s: number, o: any) => s + o.qty, 0)).toLocaleString()} kg</td>
-                                      <td className="px-3 py-2 text-right font-black text-orange-400">{Math.round(mainOrders.reduce((s: number, o: any) => s + (o.qty / Number(specs[o.itemCode]?.productYield || 1.0)), 0)).toLocaleString()} kg</td>
+                                      <td className="px-3 py-2 text-right font-bold text-gray-400">{Math.round(mainOrders.reduce((s: number, o: any) => s + o.qty, 0)).toLocaleString()} kg</td>
+                                      <td className="px-3 py-2 text-right font-bold text-gray-400">{Math.round(mainOrders.reduce((s: number, o: any) => s + (o.qty / Number(specs[o.itemCode]?.productYield || 1.0)), 0)).toLocaleString()} kg</td>
+                                      <td className="px-3 py-2 text-right font-black text-emerald-400">-</td>
+                                      <td className="px-3 py-2 text-right font-black text-emerald-400">-</td>
                                     </tr>
                                   </tfoot>
                                 </table>
@@ -3598,16 +4019,16 @@ const isMainProductSpec = (itemCode: string): boolean => {
 
 
 
-                                                                              {/* Demand by Size Summary — expandable */}
+                          {/* Demand by Size Summary — expandable */}
                           {(() => {
                             const extDaily = externalRmSupplies.find(s => String(s.receivedDate).startsWith(selectedDate));
                             let extSizes: Record<string, number> = {};
                             if (extDaily && extDaily.sizeBreakdownJson) {
-                              try { extSizes = JSON.parse(extDaily.sizeBreakdownJson); } catch (e) {}
+                              try { extSizes = JSON.parse(extDaily.sizeBreakdownJson); } catch (e) { }
                             }
-                            
+
                             const globalBlSizesFrontend = (selectedSupply as any)._blSizesFrontend || {};
-                            
+
                             const renderDemandBySize = (title: string, mode: 'bil' | 'bl' | 'fillet', targetOrders: any[]) => {
                               const allSupplySizesSet = new Set<string>();
                               if (mode === 'bl') {
@@ -3618,7 +4039,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
                                 });
                                 Object.keys(extSizes).forEach(k => allSupplySizesSet.add(k));
                               }
-                              
+
                               const allSupplySizes = Array.from(allSupplySizesSet).sort((a, b) => {
                                 if (a.toLowerCase().includes('down') && !b.toLowerCase().includes('down')) return -1;
                                 if (!a.toLowerCase().includes('down') && b.toLowerCase().includes('down')) return 1;
@@ -3745,9 +4166,9 @@ const isMainProductSpec = (itemCode: string): boolean => {
                                     if (m) { lo = parseInt(m[1], 10); hi = 9999; }
                                   } else {
                                     const m = s.match(/(\d+)\s*[-–]\s*(\d+)/);
-                                    if (m) { 
-                                      lo = parseInt(m[1], 10); 
-                                      hi = parseInt(m[2], 10); 
+                                    if (m) {
+                                      lo = parseInt(m[1], 10);
+                                      hi = parseInt(m[2], 10);
                                     } else {
                                       const singleMatch = s.match(/^(\d+)$/);
                                       if (singleMatch) {
@@ -3803,37 +4224,42 @@ const isMainProductSpec = (itemCode: string): boolean => {
 
                               sizedOrders.forEach(o => {
                                 let remainingQty = o.rmNeeded;
-                                for (const key of o.binKeys) {
+                                for (let i = 0; i < o.binKeys.length; i++) {
+                                  const key = o.binKeys[i];
                                   if (remainingQty <= 0) break;
                                   const avail = Math.max(0, supplyRemaining[key] || 0);
+                                  
                                   if (avail > 0) {
                                     const alloc = Math.min(avail, remainingQty);
-                                    if (!ordersByBin[key]) ordersByBin[key] = [];
-                                    demandByBin[key] = (demandByBin[key] || 0) + alloc;
-                                    supplyRemaining[key] -= alloc;
-                                    remainingQty -= alloc;
-                                    const allocFg = o.rmNeeded > 0 ? alloc * (o.qty / o.rmNeeded) : alloc;
-                                    ordersByBin[key].push({ soNumber: o.soNumber, itemCode: o.itemCode, size: o.size, qty: allocFg, type: o.type, rmQty: alloc });
+                                    if (alloc > 0) {
+                                      if (!ordersByBin[key]) ordersByBin[key] = [];
+                                      demandByBin[key] = (demandByBin[key] || 0) + alloc;
+                                      supplyRemaining[key] -= alloc;
+                                      remainingQty -= alloc;
+                                      const allocFg = o.rmNeeded > 0 ? alloc * (o.qty / o.rmNeeded) : alloc;
+                                      ordersByBin[key].push({ soNumber: o.soNumber, itemCode: o.itemCode, size: o.size, qty: allocFg, type: o.type, rmQty: alloc });
+                                    }
                                   }
                                 }
-                                // if (remainingQty > 0) {
-                                //   // Do not spill over sized orders into other bins. It should just be a shortage.
-                                // }
                               });
 
                               unsizedOrders.forEach(o => {
                                 let remainingQty = o.rmNeeded;
-                                for (const sl of sizeLabels) {
+                                for (let i = 0; i < sizeLabels.length; i++) {
+                                  const sl = sizeLabels[i];
                                   if (remainingQty <= 0) break;
                                   const avail = Math.max(0, supplyRemaining[sl.key] || 0);
-                                  if (avail <= 0) continue;
-                                  const allocQty = Math.min(avail, remainingQty);
-                                  demandByBin[sl.key] = (demandByBin[sl.key] || 0) + allocQty;
-                                  supplyRemaining[sl.key] -= allocQty;
-                                  remainingQty -= allocQty;
-                                  const allocFg = o.rmNeeded > 0 ? allocQty * (o.qty / o.rmNeeded) : allocQty;
-                                  const displaySize = o.isSpillover ? `${o.size} (spillover)` : o.size;
-                                  ordersByBin[sl.key].push({ soNumber: o.soNumber, itemCode: o.itemCode, size: displaySize, qty: allocFg, type: o.type, rmQty: allocQty });
+                                  if (avail > 0) {
+                                    const alloc = Math.min(avail, remainingQty);
+                                    if (alloc > 0) {
+                                      if (!ordersByBin[sl.key]) ordersByBin[sl.key] = [];
+                                      demandByBin[sl.key] = (demandByBin[sl.key] || 0) + alloc;
+                                      supplyRemaining[sl.key] -= alloc;
+                                      remainingQty -= alloc;
+                                      const allocFg = o.rmNeeded > 0 ? alloc * (o.qty / o.rmNeeded) : alloc;
+                                      ordersByBin[sl.key].push({ soNumber: o.soNumber, itemCode: o.itemCode, size: o.size, qty: allocFg, type: o.type, rmQty: alloc });
+                                    }
+                                  }
                                 }
                               });
 
@@ -3905,9 +4331,9 @@ const isMainProductSpec = (itemCode: string): boolean => {
                               return d.includes('BL ') || d.includes('BLK') || d.includes('BL-') || d.startsWith('BL');
                             };
 
-                            const filteredOrders = partId === 'leg' 
-                                ? mainOrders 
-                                : mainOrders.filter((o: any) => allowedItemCodes.includes(o.itemCode));
+                            const filteredOrders = partId === 'leg'
+                              ? mainOrders
+                              : mainOrders.filter((o: any) => allowedItemCodes.includes(o.itemCode));
 
                             if (partId === 'leg') {
                               const bilOrders = mainOrders.filter(o => !isBlItemDesc(specs[o.itemCode]?.erpItemDesc || ''));
@@ -3927,7 +4353,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
                             }
                           })()}
 
-{/* Co-Product Orders Table */}
+                          {/* Co-Product Orders Table */}
                           {coproductOrders.length > 0 && (
                             <div className="space-y-2">
                               <p className="text-[10px] font-bold text-purple-600 uppercase tracking-wider">Co-Products</p>
@@ -4014,7 +4440,7 @@ const isMainProductSpec = (itemCode: string): boolean => {
                                   <tfoot>
                                     <tr className="bg-amber-900 text-white">
                                       <td colSpan={3} className="px-3 py-2 font-bold text-xs uppercase">Total By-Product</td>
-                                      <td className="px-3 py-2 text-right font-bold">{Math.round(byproductOrders.reduce((s: number, o: any) => s + o.qty, 0)).toLocaleString()} kg</td>
+                                      <td className="px-3 py-2 text-right font-bold">{Math.round(byproductOrders.reduce((s, o) => s + o.qty, 0)).toLocaleString()} kg</td>
                                     </tr>
                                   </tfoot>
                                 </table>
@@ -4029,11 +4455,10 @@ const isMainProductSpec = (itemCode: string): boolean => {
                     })()
                   )}
                 </div>{/* END RIGHT: DEMAND PANEL */}
-
               </div>{/* END grid */}
             </div>
 
-            <div className="px-6 py-4 border-t border-gray-100 bg-gray-50/50 rounded-b-2xl flex justify-end">
+                        <div className="px-6 py-4 border-t border-gray-100 bg-gray-50/50 rounded-b-2xl flex justify-end">
               <button
                 onClick={() => setShowSupplyModal(false)}
                 className="px-6 py-2 bg-white border border-gray-300 text-gray-700 rounded-xl text-sm font-semibold hover:bg-gray-50 transition-all shadow-sm"
@@ -4045,72 +4470,93 @@ const isMainProductSpec = (itemCode: string): boolean => {
         </div>
       )}
       {/* Split/Move Modal */}
-      {splitModal.isOpen && (
+      {moveModal.isOpen && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
-            className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden"
+            className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[85vh]"
           >
             <div className="flex items-center justify-between p-4 border-b border-gray-100 bg-gray-50/50">
               <h3 className="font-bold text-gray-900 flex items-center gap-2">
                 <Move className="text-orange-500 w-5 h-5" />
-                Move / Split Order
+                Select Orders to Move
               </h3>
               <button
-                onClick={() => setSplitModal({ ...splitModal, isOpen: false })}
+                onClick={() => setMoveModal({ ...moveModal, isOpen: false })}
                 className="text-gray-400 hover:bg-gray-200 hover:text-gray-600 p-1.5 rounded-lg transition-colors"
               >
                 <X size={18} />
               </button>
             </div>
-            <div className="p-5 space-y-4">
-              <div className="bg-orange-50 border border-orange-100 rounded-xl p-3 text-sm">
-                <p className="font-bold text-orange-900 truncate" title={splitModal.orderDesc}>{splitModal.orderDesc}</p>
-                <div className="flex gap-4 mt-1 text-orange-700">
-                  <p>SO: <span className="font-bold">{splitModal.soNumber}</span></p>
-                  <p>Target Date: <span className="font-bold">{splitModal.targetDate}</span></p>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-bold text-gray-700 mb-1">
-                  Quantity to Move (kg)
-                </label>
-                <input
-                  type="number"
-                  value={splitModal.qtyToMove}
-                  onChange={(e) => setSplitModal({ ...splitModal, qtyToMove: e.target.value })}
-                  max={splitModal.maxQty}
-                  min={1}
-                  className="w-full border border-gray-300 rounded-xl px-4 py-3 text-lg font-bold focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all"
-                />
-                <div className="flex justify-between items-center mt-2">
-                  <p className="text-xs text-gray-500">
-                    Max Available: <span className="font-bold">{splitModal.maxQty}</span> kg
-                  </p>
-                  {parseFloat(splitModal.qtyToMove) < splitModal.maxQty && (
-                    <span className="text-xs font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-md">
-                      Will Split Order
-                    </span>
-                  )}
-                </div>
-              </div>
-
+            
+            <div className="p-4 bg-orange-50/50 border-b border-orange-100 shrink-0">
+               <div className="flex justify-between items-center text-sm mb-1">
+                  <span className="font-bold text-gray-800">{moveModal.itemCode}</span>
+                  <span className="font-bold text-orange-700 bg-orange-100 px-2 py-0.5 rounded flex items-center gap-2">
+                     <Calendar className="w-3 h-3" />
+                     {moveModal.sourceDate} <Move size={12}/> {moveModal.targetDate}
+                  </span>
+               </div>
+               <p className="text-xs text-gray-600 truncate">{moveModal.itemDesc}</p>
             </div>
-            <div className="p-4 border-t border-gray-100 flex justify-end gap-3 bg-gray-50/50">
-              <button
-                onClick={() => setSplitModal({ ...splitModal, isOpen: false })}
-                className="px-4 py-2 text-gray-600 font-medium hover:bg-gray-200 rounded-xl transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleConfirmSplitMove}
-                className="px-6 py-2 bg-gradient-to-r from-orange-500 to-red-500 text-white font-bold rounded-xl shadow-md hover:from-orange-600 hover:to-red-600 transition-all shadow-orange-200"
-              >
-                Confirm Move
-              </button>
+
+            <div className="p-4 overflow-y-auto space-y-2 flex-1 custom-scrollbar">
+              {moveModal.orders.map((o, idx) => (
+                <div key={idx} className={`p-3 rounded-xl border flex items-center gap-3 transition-colors ${o.selected ? 'bg-orange-50 border-orange-200 shadow-sm' : 'bg-white border-gray-100 hover:border-gray-200'}`}>
+                   <input 
+                      type="checkbox" 
+                      checked={o.selected}
+                      onChange={(e) => {
+                          const newOrders = [...moveModal.orders];
+                          newOrders[idx].selected = e.target.checked;
+                          setMoveModal({...moveModal, orders: newOrders});
+                      }}
+                      className="w-4 h-4 text-orange-500 rounded border-gray-300 focus:ring-orange-500 cursor-pointer"
+                   />
+                   <div className="flex-1">
+                      <div className="flex justify-between mb-1">
+                        <span className="text-xs font-bold text-gray-900">SO: {o.soNumber}</span>
+                        <span className="text-xs font-bold text-gray-500">Available: {o.qty} kg</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                         <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wider">Move Qty:</span>
+                         <input 
+                            type="number"
+                            disabled={!o.selected}
+                            value={o.moveQty}
+                            onChange={(e) => {
+                               const newOrders = [...moveModal.orders];
+                               newOrders[idx].moveQty = e.target.value;
+                               setMoveModal({...moveModal, orders: newOrders});
+                            }}
+                            className="w-24 text-xs font-bold border border-gray-200 rounded-lg px-2 py-1 disabled:opacity-50 focus:ring-1 focus:ring-orange-500 outline-none"
+                         />
+                      </div>
+                   </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="p-4 border-t border-gray-100 flex justify-between items-center bg-gray-50/50 shrink-0">
+              <span className="text-xs font-medium text-gray-500">
+                Selected: {moveModal.orders.filter(o=>o.selected).length} order(s)
+              </span>
+              <div className="flex gap-2">
+                  <button
+                    onClick={() => setMoveModal({ ...moveModal, isOpen: false })}
+                    className="px-4 py-2 text-sm text-gray-600 font-bold hover:bg-gray-200 rounded-xl transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleConfirmMoveBatch}
+                    disabled={moveModal.orders.filter(o=>o.selected).length === 0}
+                    className="px-5 py-2 text-sm bg-gradient-to-r from-orange-500 to-red-500 text-white font-bold hover:from-orange-600 hover:to-red-600 rounded-xl transition-all shadow-sm disabled:opacity-50"
+                  >
+                    Confirm Move
+                  </button>
+              </div>
             </div>
           </motion.div>
         </div>

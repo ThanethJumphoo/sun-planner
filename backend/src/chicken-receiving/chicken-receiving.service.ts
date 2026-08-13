@@ -62,6 +62,9 @@ export class ChickenReceivingService {
     const cleanData = Object.fromEntries(
       Object.entries(data).map(([k, v]) => [k, v === '' ? null : v]),
     );
+    delete cleanData.id;
+    delete cleanData.createAt;
+    delete cleanData.updateAt;
     await repo.update(id, cleanData);
     return await repo.findOne({ where: { id } });
   }
@@ -81,7 +84,14 @@ export class ChickenReceivingService {
   async removeByMonth(type: string, monthStr: string) {
     const repo = this.getRepo(type);
     const startDate = new Date(`${monthStr}-01`);
-    const endDate = new Date(startDate.getFullYear(), startDate.getMonth() + 1, 0, 23, 59, 59);
+    const endDate = new Date(
+      startDate.getFullYear(),
+      startDate.getMonth() + 1,
+      0,
+      23,
+      59,
+      59,
+    );
     await repo.delete({ receive_date: Between(startDate, endDate) });
     return { deleted: true, month: monthStr };
   }

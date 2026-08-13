@@ -8,27 +8,38 @@ export async function generateBlExcelPlan(
   orders: MpsPlanOrder[],
   specs: ProductSpec[],
   orderHeaders: StgErpOrderHeader[],
-  blColLabelsMap: Record<string, string>
+  blColLabelsMap: Record<string, string>,
 ): Promise<ExcelJS.Workbook> {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('BL MPS Plan');
 
   // Prepare Data
   const dailyMap = new Map();
-  plan.dailySummaries.sort((a: any, b: any) => new Date(a.productionDate).getTime() - new Date(b.productionDate).getTime()).forEach((d: any) => {
-    dailyMap.set(new Date(d.productionDate).toISOString().split('T')[0], { summary: d, orders: new Map() });
-  });
+  plan.dailySummaries
+    .sort(
+      (a: any, b: any) =>
+        new Date(a.productionDate).getTime() -
+        new Date(b.productionDate).getTime(),
+    )
+    .forEach((d: any) => {
+      dailyMap.set(new Date(d.productionDate).toISOString().split('T')[0], {
+        summary: d,
+        orders: new Map(),
+      });
+    });
 
   const dates = Array.from(dailyMap.keys());
   const specMap = new Map();
-  specs.forEach(s => specMap.set(s.erpItemCode, s));
+  specs.forEach((s) => specMap.set(s.erpItemCode, s));
 
   const itemMap = new Map();
-  orders.forEach(o => itemMap.set(o.itemCode, o.itemDesc));
+  orders.forEach((o) => itemMap.set(o.itemCode, o.itemDesc));
   const itemCodes = Array.from(itemMap.keys()).sort();
 
-  orders.forEach(o => {
-    const dateKey = new Date(o.plannedProductionDate).toISOString().split('T')[0];
+  orders.forEach((o) => {
+    const dateKey = new Date(o.plannedProductionDate)
+      .toISOString()
+      .split('T')[0];
     if (dailyMap.has(dateKey)) {
       const d = dailyMap.get(dateKey);
       d.orders.set(o.itemCode, (d.orders.get(o.itemCode) || 0) + o.quantityKg);
@@ -37,14 +48,22 @@ export async function generateBlExcelPlan(
 
   // ─── FIRST PASS: Collect BL size keys from supply.byProducts (same source as frontend modal) ───
   const allBlSizeKeysSet = new Set<string>();
-  const dailyBlSizesMap = new Map<string, Record<string, { internalVal: number, externalVal: number, totalVal: number }>>();
+  const dailyBlSizesMap = new Map<
+    string,
+    Record<
+      string,
+      { internalVal: number; externalVal: number; totalVal: number }
+    >
+  >();
 
   const supplies = (plan as any).supplyBreakdown || [];
   supplies.forEach((supply: any) => {
     const supDate = new Date(supply.productionDate).toISOString().split('T')[0];
 
     let bp: any = {};
-    try { bp = JSON.parse(supply.byProducts || '{}'); } catch (e) {}
+    try {
+      bp = JSON.parse(supply.byProducts || '{}');
+    } catch (e) {}
     const blData = bp['BL-DEBONE'] || bp['BL'] || bp['BL (Debone)'] || {};
     const totalBlQty = Number(blData.qty || blData.kg || 0);
     const blSizesDb = blData.sizes || {};
@@ -53,34 +72,53 @@ export async function generateBlExcelPlan(
     const intRatio = totalBlQty > 0 ? intTotal / totalBlQty : 1;
     const extRatio = totalBlQty > 0 ? extTotal / totalBlQty : 0;
 
-    const blSizesFrontend: Record<string, { internalVal: number, externalVal: number, totalVal: number }> = {};
+    const blSizesFrontend: Record<
+      string,
+      { internalVal: number; externalVal: number; totalVal: number }
+    > = {};
 
     if (Object.keys(blSizesDb).length > 0) {
       // Path A: sizes exist in byProducts → use directly (same as frontend line 2712-2715)
       for (const [sz, qty] of Object.entries(blSizesDb)) {
         const q = Number(qty);
         if (q > 0) {
-          blSizesFrontend[sz] = { internalVal: q * intRatio, externalVal: q * extRatio, totalVal: q };
+          blSizesFrontend[sz] = {
+            internalVal: q * intRatio,
+            externalVal: q * extRatio,
+            totalVal: q,
+          };
           allBlSizeKeysSet.add(sz);
         }
       }
-    } else if (supply.sizes && Array.isArray(supply.sizes) && supply.sizes.length > 0) {
+    } else if (
+      supply.sizes &&
+      Array.isArray(supply.sizes) &&
+      supply.sizes.length > 0
+    ) {
       // Path B: no sizes in byProducts → compute from supply.sizes relation (same as frontend line 2665-2711)
       // Build demand map from orders
       const d = dailyMap.get(supDate);
       const demandKgByBilSize: Record<string, number> = {};
       if (d) {
         d.orders.forEach((qty: number, itemCode: string) => {
-          const spec = specs.find(s => s.erpItemCode === itemCode);
+          const spec = specs.find((s) => s.erpItemCode === itemCode);
           const oSize = spec?.productSize?.trim() || '';
           if (oSize && oSize.toLowerCase() !== 'unsize' && oSize !== '') {
             const sizeMatch = oSize.match(/(\d+-\d+|\d+\s*Up|\d+\s*Down)/i);
             let mappedSize = sizeMatch ? sizeMatch[0] : oSize;
-            if (mappedSize.toLowerCase().includes('down')) mappedSize = mappedSize.replace(/\s+/g, '') + 'Down';
-            if (mappedSize.toLowerCase().includes('up')) mappedSize = mappedSize.replace(/\s+/g, '') + 'Up';
-            mappedSize = mappedSize.replace('DownDown', 'Down').replace('UpUp', 'Up');
-            const oYield = spec?.productYield && Number(spec.productYield) > 0 ? Number(spec.productYield) : 1;
-            demandKgByBilSize[mappedSize] = (demandKgByBilSize[mappedSize] || 0) + (qty / oYield);
+            if (mappedSize.toLowerCase().includes('down'))
+              mappedSize = mappedSize.replace(/\s+/g, '') + 'Down';
+            if (mappedSize.toLowerCase().includes('up'))
+              mappedSize = mappedSize.replace(/\s+/g, '') + 'Up';
+            mappedSize = mappedSize
+              .replace('DownDown', 'Down')
+              .replace('UpUp', 'Up');
+            const oYield =
+              spec?.productYield && Number(spec.productYield) > 0
+                ? Number(spec.productYield)
+                : 1;
+            demandKgByBilSize[mappedSize] =
+              (demandKgByBilSize[mappedSize] || 0) + qty / oYield;
           }
         });
       }
@@ -88,20 +126,26 @@ export async function generateBlExcelPlan(
       const bilSizesMap: Record<string, number> = {};
       supply.sizes.forEach((s: any) => {
         if (s.groupSize) {
-          bilSizesMap[s.groupSize] = (bilSizesMap[s.groupSize] || 0) + Number(s.quantityKg || 0);
+          bilSizesMap[s.groupSize] =
+            (bilSizesMap[s.groupSize] || 0) + Number(s.quantityKg || 0);
         }
       });
 
-      const initialRems: { bilSz: string, rem: number, totalQty: number }[] = [];
+      const initialRems: { bilSz: string; rem: number; totalQty: number }[] =
+        [];
       let sumInitialRem = 0;
       let sumTotalQty = 0;
 
-      Object.keys(bilSizesMap).forEach(bilSz => {
+      Object.keys(bilSizesMap).forEach((bilSz) => {
         const internalQty = bilSizesMap[bilSz];
         const totalQty = internalQty;
         let demand = 0;
         for (const [dSize, dQty] of Object.entries(demandKgByBilSize)) {
-          if (bilSz.toLowerCase().replace(/\s+/g, '') === dSize.toLowerCase().replace(/\s+/g, '')) demand += dQty;
+          if (
+            bilSz.toLowerCase().replace(/\s+/g, '') ===
+            dSize.toLowerCase().replace(/\s+/g, '')
+          )
+            demand += dQty;
         }
         const rem = Math.max(0, totalQty - demand);
         initialRems.push({ bilSz, rem, totalQty });
@@ -109,7 +153,7 @@ export async function generateBlExcelPlan(
         sumTotalQty += totalQty;
       });
 
-      const trk = (supply as any)._tracker || {};
+      const trk = supply._tracker || {};
       const rm = trk.rmBreakdown || {};
       const blRmTotal = Number(rm.bl || 0);
 
@@ -127,7 +171,7 @@ export async function generateBlExcelPlan(
           blSizesFrontend[blSz] = {
             internalVal: (blSizesFrontend[blSz]?.internalVal || 0) + blQty,
             externalVal: 0,
-            totalVal: (blSizesFrontend[blSz]?.totalVal || 0) + blQty
+            totalVal: (blSizesFrontend[blSz]?.totalVal || 0) + blQty,
           };
           allBlSizeKeysSet.add(blSz);
         }
@@ -149,7 +193,7 @@ export async function generateBlExcelPlan(
   // Row 1: Section Headers
   const sectionRow = sheet.addRow([]);
   let colIdx = 3; // Start after Date, Day
-  
+
   const supplyStart = colIdx;
   const supplyEnd = colIdx + 11; // Total(4), Int(4), Ext(4) = 12 columns
   sectionRow.getCell(supplyStart).value = 'Supply Control (RM BL)';
@@ -169,7 +213,7 @@ export async function generateBlExcelPlan(
   colIdx = blockEnd + 1;
 
   const sizeStart = colIdx;
-  const sizeEnd = colIdx + (blSizeKeys.length * 2) - 1;
+  const sizeEnd = colIdx + blSizeKeys.length * 2 - 1;
   if (blSizeKeys.length > 0) {
     sectionRow.getCell(sizeStart).value = 'BL Size';
     if (sizeEnd > sizeStart) sheet.mergeCells(1, sizeStart, 1, sizeEnd);
@@ -189,16 +233,25 @@ export async function generateBlExcelPlan(
     { start: icutStart, end: icutEnd, color: 'FFE67CA0' },
     { start: blockStart, end: blockEnd, color: 'FFED7D31' },
     { start: sizeStart, end: sizeEnd, color: 'FF2E7D32' },
-    { start: prodStart, end: prodEnd, color: 'FF7030A0' }
+    { start: prodStart, end: prodEnd, color: 'FF7030A0' },
   ];
-  secDefs.forEach(sec => {
+  secDefs.forEach((sec) => {
     if (sec.start <= sec.end) {
       for (let i = sec.start; i <= sec.end; i++) {
         const cell = sectionRow.getCell(i);
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: sec.color } };
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: sec.color },
+        };
         cell.font = { color: { argb: 'FFFFFFFF' }, bold: true, size: 10 };
         cell.alignment = { horizontal: 'center' };
-        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' },
+        };
       }
     }
   });
@@ -211,49 +264,90 @@ export async function generateBlExcelPlan(
   for (let i = prodStart; i <= prodEnd; i++) {
     const cell = machineNameRow.getCell(i);
     cell.font = { bold: true, size: 8 };
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFF2F2F2' },
+    };
     cell.alignment = { horizontal: 'center', wrapText: true };
-    cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+    cell.border = {
+      top: { style: 'thin' },
+      left: { style: 'thin' },
+      bottom: { style: 'thin' },
+      right: { style: 'thin' },
+    };
   }
   machineNameRow.height = 30;
 
   // Row 3: Column Headers
   const subHeaders = [
-    'Date', 'Day',
-    'Total RM BL', 'BL (เนื้อรวม)', 'BL-TH (สะโพก)', 'BL-DR (น่อง)',
-    'Int. RM Total', 'Int. BL (เนื้อรวม)', 'Int. BL-TH (สะโพก)', 'Int. BL-DR (น่อง)',
-    'Ext. RM Total', 'Ext. BL (เนื้อรวม)', 'Ext. BL-TH (สะโพก)', 'Ext. BL-DR (น่อง)',
-    'I-Cut Process (kg)', 'I-Cut Hours', 'I-Cut Cap (hrs)', 'I-Cut Util (%)', 'Manual Trim (kg)',
-    'Block Produced', 'Block Used',
-    ...blSizeKeys.flatMap(sz => [`Int. ${sz}`, `Ext. ${sz}`]),
-    ...itemCodes
+    'Date',
+    'Day',
+    'Total RM BL',
+    'BL (เนื้อรวม)',
+    'BL-TH (สะโพก)',
+    'BL-DR (น่อง)',
+    'Int. RM Total',
+    'Int. BL (เนื้อรวม)',
+    'Int. BL-TH (สะโพก)',
+    'Int. BL-DR (น่อง)',
+    'Ext. RM Total',
+    'Ext. BL (เนื้อรวม)',
+    'Ext. BL-TH (สะโพก)',
+    'Ext. BL-DR (น่อง)',
+    'I-Cut Process (kg)',
+    'I-Cut Hours',
+    'I-Cut Cap (hrs)',
+    'I-Cut Util (%)',
+    'Manual Trim (kg)',
+    'Block Produced',
+    'Block Used',
+    ...blSizeKeys.flatMap((sz) => [`Int. ${sz}`, `Ext. ${sz}`]),
+    ...itemCodes,
   ];
   const headerRow = sheet.addRow(subHeaders);
   headerRow.eachCell((cell) => {
     cell.font = { bold: true, size: 8 };
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
-    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-    cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFD9D9D9' },
+    };
+    cell.alignment = {
+      horizontal: 'center',
+      vertical: 'middle',
+      wrapText: true,
+    };
+    cell.border = {
+      top: { style: 'thin' },
+      left: { style: 'thin' },
+      bottom: { style: 'thin' },
+      right: { style: 'thin' },
+    };
   });
   headerRow.height = 35;
 
   // Data Rows
-  dates.forEach(dateStr => {
+  dates.forEach((dateStr) => {
     const d = dailyMap.get(dateStr);
     const dateObj = new Date(dateStr);
     const trk = (() => {
-      try { return JSON.parse(d.summary.blTrackerJson || '{}'); } catch (e) { return {}; }
+      try {
+        return JSON.parse(d.summary.blTrackerJson || '{}');
+      } catch (e) {
+        return {};
+      }
     })();
     const rm = trk.rmBreakdown || {};
     const intRm = trk.internalRemaining || {};
     const extRm = trk.externalRemaining || {};
-    
+
     const blKg = Number(rm.bl || 0);
     const blThKg = Number(rm.blTh || 0);
     const blDrKg = Number(rm.blDr || 0);
-    
+
     const totalBlSum = blKg + blThKg + blDrKg;
-    
+
     const intBl = Number(intRm.BL || 0);
     const intBlTh = Number(intRm.BLTH || 0);
     const intBlDr = Number(intRm.BLDR || 0);
@@ -277,22 +371,36 @@ export async function generateBlExcelPlan(
     const rowData: any[] = [
       `${dateObj.getDate()}/${dateObj.toLocaleString('en-US', { month: 'short' })}`,
       dateObj.toLocaleDateString('en-US', { weekday: 'short' }),
-      rmBlUsed, blKg, blThKg, blDrKg,
-      totalIntRm, intBl, intBlTh, intBlDr,
-      totalExtRm, extBl, extBlTh, extBlDr,
-      Number(trk.icutUsedKg || 0), icutHours, icutCap, `${icutUtil.toFixed(1)}%`, Number(trk.manualUsedKg || 0),
-      Number(trk.blBlockProduced || 0), Number(trk.blBlockUsed || 0)
+      rmBlUsed,
+      blKg,
+      blThKg,
+      blDrKg,
+      totalIntRm,
+      intBl,
+      intBlTh,
+      intBlDr,
+      totalExtRm,
+      extBl,
+      extBlTh,
+      extBlDr,
+      Number(trk.icutUsedKg || 0),
+      icutHours,
+      icutCap,
+      `${icutUtil.toFixed(1)}%`,
+      Number(trk.manualUsedKg || 0),
+      Number(trk.blBlockProduced || 0),
+      Number(trk.blBlockUsed || 0),
     ];
 
     // BL Size columns — use pre-computed data from first pass (same source as frontend modal)
     const dailySizes = dailyBlSizesMap.get(dateStr) || {};
-    blSizeKeys.forEach(sz => {
+    blSizeKeys.forEach((sz) => {
       const sizeData = dailySizes[sz];
       rowData.push(Math.round(sizeData?.internalVal || 0));
       rowData.push(Math.round(sizeData?.externalVal || 0));
     });
 
-    itemCodes.forEach(code => {
+    itemCodes.forEach((code) => {
       rowData.push(d.orders.get(code) || 0);
     });
 
@@ -301,14 +409,20 @@ export async function generateBlExcelPlan(
       if (colNumber > 2 && typeof cell.value === 'number') {
         cell.numFmt = '#,##0';
       }
-      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+      cell.border = {
+        top: { style: 'thin' },
+        left: { style: 'thin' },
+        bottom: { style: 'thin' },
+        right: { style: 'thin' },
+      };
     });
   });
 
   // Totals Row
   const totalRowData: any[] = ['Total', ''];
   for (let i = 2; i < subHeaders.length; i++) {
-    if (i === 15) { // I-Cut Util (%)
+    if (i === 15) {
+      // I-Cut Util (%)
       totalRowData.push('');
       continue;
     }
@@ -322,11 +436,20 @@ export async function generateBlExcelPlan(
   const totalsRow = sheet.addRow(totalRowData);
   totalsRow.eachCell((cell, colNumber) => {
     cell.font = { bold: true };
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFE699' } };
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFFE699' },
+    };
     if (colNumber > 2 && typeof cell.value === 'number') {
       cell.numFmt = '#,##0';
     }
-    cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+    cell.border = {
+      top: { style: 'thin' },
+      left: { style: 'thin' },
+      bottom: { style: 'thin' },
+      right: { style: 'thin' },
+    };
   });
 
   // Formatting

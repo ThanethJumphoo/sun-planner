@@ -1,1 +1,0 @@
-const sql = require('mssql'); async function run() { try { await sql.connect('mssql://sa:Your_password123@127.0.0.1:1433/sun_planner?encrypt=false'); const result = await sql.query("SELECT TOP 20 so_number, item_desc, planned_production_date FROM mps_plan_order ORDER BY id DESC"); console.dir(result.recordset); sql.close(); } catch(e) { console.error(e); } } run();

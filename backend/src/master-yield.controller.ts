@@ -78,14 +78,20 @@ export class MasterYieldController {
     // 1. Cleanup ProductSpecs referencing these IDs
     const allSpecs = await this.productSpecRepository.find();
     const specsToUpdate = [];
-    
+
     for (const spec of allSpecs) {
       if (spec.masterYieldIds) {
-        const currentIds = spec.masterYieldIds.split(',').map(s => s.trim()).filter(s => s);
-        const filteredIds = currentIds.filter(cid => !idsToDelete.includes(cid));
-        
+        const currentIds = spec.masterYieldIds
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s);
+        const filteredIds = currentIds.filter(
+          (cid) => !idsToDelete.includes(cid),
+        );
+
         if (currentIds.length !== filteredIds.length) {
-          spec.masterYieldIds = filteredIds.length > 0 ? filteredIds.join(',') : null;
+          spec.masterYieldIds =
+            filteredIds.length > 0 ? filteredIds.join(',') : null;
           specsToUpdate.push(spec);
         }
       }
