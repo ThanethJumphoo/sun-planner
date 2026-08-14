@@ -14,6 +14,7 @@ import MachineSetup from './pages/MachineSetup';
 import ExternalRmInput from './pages/ExternalRmInput';
 import BlBeltGateMatrixSetup from './pages/BlBeltGateMatrixSetup';
 import MainLayout from './components/layout/MainLayout';
+import BlDpsPlan from './pages/BlDpsPlan';
 import UserManagement from './pages/UserManagement';
 
 function App() {
@@ -31,6 +32,7 @@ function App() {
           <Route path="/product-spec" element={<ProductSpec />} />
           <Route path="/weight-distribution" element={<WeightDistribution />} />
           <Route path="/:partId/mps" element={<MPSPlan />} />
+          <Route path="/bl/dps" element={<BlDpsPlan />} />
           <Route path="/:partId/dps" element={<DPSPlan />} />
           <Route path="/:partId/manual-operation" element={<ManualOperation />} />
           <Route path="/master-yield" element={<MasterYield />} />

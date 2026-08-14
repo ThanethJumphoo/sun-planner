@@ -3572,11 +3572,23 @@ export class MpsController {
 
     const orders = await query.getRawAndEntities();
 
-    // Merge priority into entities
+    const itemCodes = [...new Set(orders.entities.map(o => o.itemCode.trim()))];
+    let specMap = new Map();
+    if (itemCodes.length > 0) {
+      const productSpecs = await this.specRepo.createQueryBuilder('ps')
+        .where('LTRIM(RTRIM(ps.erpItemCode)) IN (:...itemCodes)', { itemCodes })
+        .getMany();
+      for (const spec of productSpecs) {
+        specMap.set(spec.erpItemCode.trim(), spec.icutSpeed);
+      }
+    }
+
+    // Merge priority and icutSpeed into entities
     const merged = orders.entities.map((order, idx) => {
       return {
         ...order,
         priority: orders.raw[idx].priority,
+        icutSpeed: Number(specMap.get(order.itemCode.trim())) || 0,
       };
     });
 
@@ -3608,7 +3620,24 @@ export class MpsController {
       }
     }
 
-    return Array.from(groupedMap.values());
+    return Array.from(groupedMap.values())
+      .filter(o => o.quantityKg > 0)
+      .map(o => ({
+      id: o.id,
+      erpOrderLineId: o.erpOrderLineId,
+      soNumber: o.soNumber,
+      itemCode: o.itemCode,
+      itemDesc: o.itemDesc,
+      productType: o.productType,
+      quantityKg: o.quantityKg,
+      shipDate: o.shipDate,
+      plannedProductionDate: o.plannedProductionDate,
+      finishedProductionDate: o.finishedProductionDate,
+      isManualOverride: o.isManualOverride,
+      version: o.version,
+      priority: o.priority,
+      icutSpeed: o.icutSpeed
+    }));
   }
 
   // 10. Update Order Priorities (Batch)

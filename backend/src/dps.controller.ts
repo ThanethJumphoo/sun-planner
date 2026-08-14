@@ -158,7 +158,7 @@ export class DpsController {
         const dbBin = dbSublot.bins.find(b => b.sizeLabel === alloc.size);
         const dbOrder = reloadedPlan.orders.find(o => {
           if (alloc.orderId.startsWith('L-CUSTOM-')) {
-            return o.erpOrderLineId === customIdMap.get(alloc.orderId);
+            return Number(o.erpOrderLineId) === Number(customIdMap.get(alloc.orderId));
           }
           return `L-${o.erpOrderLineId}` === alloc.orderId || `${o.erpOrderLineId}` === alloc.orderId;
         });
@@ -228,7 +228,8 @@ export class DpsController {
     const specs = await this.dataSource.getRepository(ProductSpec).find();
     const specMap = new Map<string, any>();
     specs.forEach((s: any) => {
-      specMap.set(s.erpItemCode, {
+      if (!s.erpItemCode) return;
+      specMap.set(s.erpItemCode.trim(), {
         speed: Number(s.productSpeed) || 45,
         weight: Number(s.productWeight) || 0,
         masterYieldIds: s.masterYieldIds || '',
@@ -250,7 +251,7 @@ export class DpsController {
         let shiftPcs = 0;
         plan.allocations.forEach(a => {
           if ((a.sourceBin?.sublot?.shift || 'A').toUpperCase().trim() === shift) {
-            const speed = specMap.get(a.targetOrder?.itemCode || '')?.speed || 45;
+            const speed = specMap.get(a.targetOrder?.itemCode?.trim() || '')?.speed || 45;
             shiftPcs += Number(a.allocatedKg) / speed;
           }
         });
@@ -442,6 +443,51 @@ export class DpsController {
 
     // Let's list each shift's summary
     let currentRow = 5;
+
+    // --- DEMAND ORDERS SECTION ---
+    summarySheet.getCell(`A${currentRow}`).value = 'แผนความต้องการสินค้า (Demand Orders)';
+    summarySheet.getCell(`A${currentRow}`).font = { name: 'Segoe UI', size: 12, bold: true, color: { argb: 'FF1F497D' } };
+    currentRow++;
+
+    const demandHeaders = ['รหัสสินค้า (Code)', 'รายละเอียดสินค้า (Description)', 'ขนาด (Size)', 'ความต้องการ (Demand Kg)', 'เติมเต็มแล้ว (Fulfilled Kg)', 'สถานะ'];
+    const demandHeaderRow = summarySheet.addRow(demandHeaders);
+    demandHeaderRow.height = 20;
+    demandHeaderRow.eachCell((cell, colNum) => {
+      if (colNum > demandHeaders.length) return;
+      cell.font = { name: 'Segoe UI', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F497D' } }; // Dark Navy
+      cell.alignment = { vertical: 'middle', horizontal: 'center' };
+      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+    });
+    currentRow++;
+
+    plan.orders.forEach(order => {
+      const isManual = order.erpOrderLineId < 0;
+      const status = order.fulfilledKg >= order.requiredKg ? 'COMPLETED' : 'PENDING';
+      const row = summarySheet.addRow([
+        order.itemCode,
+        order.itemDesc,
+        order.productSize || '-',
+        order.requiredKg,
+        order.fulfilledKg,
+        isManual ? `MANUAL (${status})` : status
+      ]);
+      row.eachCell((cell, colNum) => {
+        if (colNum > demandHeaders.length) return;
+        cell.font = { name: 'Segoe UI', size: 10 };
+        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+        if (colNum >= 4 && colNum <= 5) {
+          cell.alignment = { vertical: 'middle', horizontal: 'right' };
+          cell.numFmt = '#,##0.0';
+        } else {
+          cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        }
+      });
+      currentRow++;
+    });
+
+    currentRow += 2; // Spacing before shifts
+
 
     const sortedShifts = Object.keys(shiftSummaries).sort();
     if (sortedShifts.length === 0) {

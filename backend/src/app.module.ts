@@ -52,6 +52,8 @@ import { ExternalRmSupplyController } from './external-rm-supply.controller';
 import { ICutMaster } from './icut-master.entity';
 import { BlBeltGateMatrix } from './bl-belt-gate-matrix.entity';
 import { BlBeltGateMatrixController } from './bl-belt-gate-matrix.controller';
+import { BlDpsPlan, BlDpsBeltGate, BlDpsConveyorIcut } from './bl-dps-plan.entity';
+import { BlDpsController } from './bl-dps.controller';
 
 @Module({
   imports: [
@@ -122,6 +124,9 @@ import { BlBeltGateMatrixController } from './bl-belt-gate-matrix.controller';
       ExternalRmSupply,
       ICutMaster,
       BlBeltGateMatrix,
+      BlDpsPlan,
+      BlDpsBeltGate,
+      BlDpsConveyorIcut,
     ]),
   ],
   controllers: [
@@ -138,6 +143,7 @@ import { BlBeltGateMatrixController } from './bl-belt-gate-matrix.controller';
     MachineConfigController,
     ExternalRmSupplyController,
     BlBeltGateMatrixController,
+    BlDpsController,
     require('./debug.controller').DebugController,
   ],
   providers: [AppService, OracleIntegrationService],
